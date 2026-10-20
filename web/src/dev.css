@@ -1,0 +1,7 @@
+/* Standalone acceptance harness only. Leaf supplies these base styles and the
+   shared UI component utilities when the production remote is mounted. */
+@import "./plugin.css";
+@import "tailwindcss/preflight.css" layer(base);
+@source "../../../redbamboo-packages/packages/ui/src";
+
+html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }

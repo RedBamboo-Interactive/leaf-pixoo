@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "kernelApi": "^0.1.0",
   "description": "A quiet 64x64 peripheral face for one bound Agent, with a faithful Pixoo emulator.",
-  "icon": "ph-smiley",
+  "icon": "ph-bold ph-monitor-play",
   "color": "violet",
-  "requires": ["entities"],
+  "requires": ["entities", "nova"],
   "backend": {
     "assembly": "Leaf.Plugins.Pixoo",
     "apiNamespace": "extensions"
@@ -16,7 +16,22 @@
     "route": "/apps/pixoo",
     "pwa": false,
     "sections": [
-      { "id": "emulator", "name": "Face", "icon": "ph-smiley", "path": "emulator", "order": 1, "default": true }
+      { "id": "emulator", "name": "Face", "icon": "ph-bold ph-monitor-play", "path": "emulator", "order": 1, "default": true }
+    ],
+    "extensions": [
+      {
+        "id": "display",
+        "target": "nova",
+        "slot": "app-section",
+        "order": 3,
+        "description": "The selected Agent's Pixoo peripheral face and emulators.",
+        "section": {
+          "name": "Display",
+          "icon": "ph-bold ph-monitor-play",
+          "path": "display",
+          "description": "Pixoo displays bound to the selected Agent."
+        }
+      }
     ]
   },
   "permissions": [

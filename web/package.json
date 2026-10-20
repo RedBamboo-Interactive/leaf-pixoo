@@ -11,6 +11,7 @@
     "test:visual": "node ../tests/visual.cjs"
   },
   "dependencies": {
+    "@redbamboo/ui": "link:../../redbamboo-packages/packages/ui",
     "@redbamboo/utility": "link:../../redbamboo-packages/packages/utility"
   },
   "peerDependencies": {
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@module-federation/vite": "^1.16.12",
+    "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
@@ -26,6 +28,7 @@
     "playwright": "^1.55.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "tailwindcss": "^4.1.18",
     "typescript": "~5.9.3",
     "vite": "^8.0.10"
   }

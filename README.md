@@ -1,6 +1,6 @@
 # Leaf Pixoo
 
-Leaf Pixoo is a RedLeaf extension that gives one selected Agent a quiet 64×64 peripheral face. v1 is emulator-first: its Leaf page renders the current server-generated loop as a convincing LED matrix, lets the owner bind devices to Agent entities, and provides explicit state/gesture simulation.
+Leaf Pixoo is a RedLeaf extension that gives one selected Agent a quiet 64×64 peripheral face. v1 is emulator-first: its Leaf page renders the current server-generated loop as a convincing LED matrix, lets the owner bind devices to Agent entities, and provides explicit state/gesture simulation. The same surface is contributed to Nova as its **Display** section, scoped to Nova's selected Agent.
 
 It is intentionally a face, not a dashboard. It never renders conversation text, Agent names, notifications, clocks, or status icons on the display.
 
@@ -14,6 +14,11 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - `IDisplaySink` implementations for the in-memory emulator and an explicitly disabled-by-default Pixoo-64 HTTP driver.
 - One serialized latest-wins queue per device. A push is a complete multi-frame loop; unchanged state does not push, and changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
+- RedLeaf design-system chrome from `@redbamboo/ui` with Tailwind v4 tokens in both light and dark themes. Only the physical LED matrix, glow, gaps, and bezel are bespoke.
+- A standalone Leaf surface at `/apps/pixoo/emulator`, including canonical Agent `EntityCard` references and a design-system Agent picker.
+- A Nova `app-section` at `/apps/nova/display`; it reads Nova's reactive `nova_settings.agentFilter`, lists only devices bound to that exact Agent, and offers no independent Agent dropdown.
+
+Nova's extension component context currently contains contributor/extension/target/route metadata, not Agent identity. Nova itself stores the selected Agent as `agentFilter` in the shared `nova_settings` local store. Pixoo observes that canonical local store through `@redbamboo/utility`; when Nova is in its all-Agents state, the section asks the owner to choose an Agent instead of guessing one.
 
 ## Identity and live-event boundary
 
@@ -57,6 +62,6 @@ The local visual harness is `pnpm run dev` from `web/`; `node tests/visual.cjs` 
 
 ## Loading after review
 
-Do not add this checkout to `leaf.workspace.json`. After review, build the `.leafpkg`, then have a RedLeaf administrator install that exact local package through `POST /api/plugins/install` with JSON `{ "path": "<absolute package path>", "sha256": "<value from .sha256>" }` and the signed execution bearer. Verify `GET /api/plugins/pixoo/status` reports the package on disk and restart pending. Coordinate one planned `POST /api/setup/restart`; after Leaf returns, verify the same status reports the backend loaded, then open `/apps/pixoo`.
+Do not add this checkout to `leaf.workspace.json`. After review, build the `.leafpkg`, then have a RedLeaf administrator install that exact local package through `POST /api/plugins/install` with JSON `{ "path": "<absolute package path>", "sha256": "<value from .sha256>" }` and the signed execution bearer. Verify `GET /api/plugins/pixoo/status` reports the package on disk and restart pending. Coordinate one planned `POST /api/setup/restart`; after Leaf returns, verify the same status reports the backend loaded, then open `/apps/pixoo/emulator` or Nova's `/apps/nova/display` section.
 
 No Skill seeds ship in this package.
