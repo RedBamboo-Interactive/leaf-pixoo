@@ -5,9 +5,11 @@ const base='/api/extensions/pixoo'
 const client=createExecutionTokenClient('pixoo')
 const harness=location.port==='4173' || new URLSearchParams(location.search).has('harness')
 const ids={device:'11111111-1111-1111-1111-111111111111',agent:'22222222-2222-2222-2222-222222222222'}
-const agents:Agent[]=[{id:ids.agent,name:'Juniper',color:'#78e6c4'},{id:'33333333-3333-3333-3333-333333333333',name:'Vesper',color:'#9a7cff'}]
-let device:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:74,agentId:ids.agent,agentColor:'#78e6c4',minimumPushGapMs:1000,hardwareEnabled:false}
+const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff'},{id:'33333333-3333-3333-3333-333333333333',name:'Vesper',color:'#78e6c4'}]
+let device:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
 let snapshot:Snapshot={device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}]}
+let preview:Partial<Record<FaceState,Frame[]>>|null=null
+let previewRequest:Promise<void>|null=null
 
 async function json<T>(path:string,init?:RequestInit):Promise<T>{
   const response=await client.fetch(base+path,{...init,headers:{'Content-Type':'application/json',...(init?.headers??{})}})
@@ -16,22 +18,37 @@ async function json<T>(path:string,init?:RequestInit):Promise<T>{
 }
 export async function listAgents(){return harness?agents:json<Agent[]>('/agents')}
 export async function listDevices(){return harness?[device]:json<Device[]>('/devices')}
-export async function current(deviceId:string){return harness?snapshot:json<Snapshot>(`/emulator?deviceId=${encodeURIComponent(deviceId)}`)}
+export async function current(deviceId:string){
+  if(!harness)return json<Snapshot>(`/emulator?deviceId=${encodeURIComponent(deviceId)}`)
+  await loadPreview();snapshot={...snapshot,frames:preview?.[snapshot.state]??snapshot.frames};return snapshot
+}
 export async function updateDevice(value:Device){
   if(harness){device={...value,agentColor:agents.find(a=>a.id===value.agentId)?.color??value.agentColor};snapshot={...snapshot,device};return device}
   return json<Device>(`/devices/${value.id}`,{method:'PUT',body:JSON.stringify(value)})
 }
 export async function createDevice(agentId:string){
   const value={name:'Living room emulator',kind:'emulator' as const,brightness:74,agentId,agentColor:agents.find(a=>a.id===agentId)?.color??'#7c5cff',minimumPushGapMs:1000,hardwareEnabled:false}
-  if(harness){device={id:ids.device,...value};snapshot={device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[]};return device}
+  if(harness){await loadPreview();device={id:ids.device,...value};snapshot={device,state:'resting',frames:preview?.resting??render('resting',device.agentColor,device.brightness),history:[]};return device}
   return json<Device>('/devices',{method:'POST',body:JSON.stringify(value)})
 }
 export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGesture){
   if(harness){
-    snapshot={device,state,gesture,frames:render(state,device.agentColor,device.brightness,gesture),history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:4},...snapshot.history].slice(0,8)}
+    await loadPreview()
+    const frames=gesture?render(state,device.agentColor,device.brightness,gesture):preview?.[state]??render(state,device.agentColor,device.brightness)
+    snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...snapshot.history].slice(0,8)}
     return snapshot
   }
   return json<Snapshot>(`/devices/${deviceId}/simulate`,{method:'POST',body:JSON.stringify({state,gesture})})
+}
+
+async function loadPreview(){
+  if(preview||!harness)return
+  previewRequest??=fetch('/portrait-preview.json').then(async response=>{
+    if(!response.ok)throw new Error(`portrait preview ${response.status}`)
+    const body=await response.json() as {states:Partial<Record<FaceState,Frame[]>>}
+    preview=body.states
+  }).catch(()=>{preview={}})
+  await previewRequest
 }
 
 function render(state:FaceState,color:string,brightness:number,gesture?:FaceGesture):Frame[]{

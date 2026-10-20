@@ -10,7 +10,7 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - `emulator` and `pixoo64` device kinds, Agent-colour weather field, brightness, and a configurable minimum push gap (default 1000 ms).
 - Face states: `dark`, `resting`, `listening`, `thinking`, `speaking`, `working`, `dreaming`, and `asleep`.
 - One-shot gestures: `arrive` and `react`.
-- Swappable `IFaceRenderer` with a procedural server-side placeholder renderer.
+- Swappable `IFaceRenderer` whose primary renderer is a cached portrait pack from the bound Agent's current Outfit image (or avatar), with a faithful deterministic reduction and finally the procedural face as fallbacks.
 - `IDisplaySink` implementations for the in-memory emulator and an explicitly disabled-by-default Pixoo-64 HTTP driver.
 - One serialized latest-wins queue per device. A push is a complete multi-frame loop; unchanged state does not push, and changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
@@ -19,6 +19,16 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - A Nova `app-section` at `/apps/nova/display`; it reads Nova's reactive `nova_settings.agentFilter`, lists only devices bound to that exact Agent, and offers no independent Agent dropdown.
 
 Nova's extension component context currently contains contributor/extension/target/route metadata, not Agent identity. Nova itself stores the selected Agent as `agentFilter` in the shared `nova_settings` local store. Pixoo observes that canonical local store through `@redbamboo/utility`; when Nova is in its all-Agents state, the section asks the owner to choose an Agent instead of guessing one.
+
+## Portrait packs
+
+Pixoo resolves the bound Agent's current `outfit` entity and its `asset`; if either is absent it uses the Agent avatar. The source bytes are SHA-256 keyed, so a source change invalidates the cache while an unchanged image reuses its accepted pack. Outfit selection's `agent.avatar-changed` event schedules a rebuild. The bridge also subscribes to `entity.updated`, but the current kernel only broadcasts that mutation to browser WebSockets, not backend `IPluginEvents`; normal device reads therefore perform the same source-hash check as a reliable fallback.
+
+The renderer first finds a bust crop and deterministic facial regions locally. It submits one `wait:false` RedCompute job at a time through `qwen-image-21-reference-e1003bc3`, waits only on the returned durable job ID, and permits at most three deterministic seeds. The redraw is reduced with grid-pitch detection (when a regular grid is measurable), box sampling, and a non-dithered 48-colour maximum palette. If no semantic candidate validates, the B-style source reduction becomes the active pack. An already active pack stays on the display until its replacement passes validation; if no image can be read, the procedural face remains available.
+
+Animation is deterministic compositing over the accepted 64×64 base. Eye, mouth, torso, subject, and background regions drive blinks, mouth shapes, gaze, breathing, dimming, and background-only weather tint. It never asks the image model for per-frame variants, avoiding identity drift and shimmer. Each stored pack includes the crop, primary base, faithful fallback, provenance manifest (source asset/hash, workflow, seed, timestamp, regions and metrics), native state/gesture strips, 8× nearest-neighbour review strips, and a source-versus-result comparison as Leaf Assets.
+
+As discovered on 20 October 2026, RedCompute `/discover` exposes the running image generator (`generate`, exact-job progress, and output), but declares no face/landmark detector, mask endpoint, inpainting, or image-edit capability. Region finding is consequently deterministic and local; it is deliberately replaceable when a declared landmark capability becomes available.
 
 ## Identity and live-event boundary
 
@@ -58,7 +68,7 @@ Pop-Location
 .\build-leafpkg.ps1 -LeafSdkProject 'T:\Projects\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj'
 ```
 
-The local visual harness is `pnpm run dev` from `web/`; `node tests/visual.cjs` captures desktop and phone evidence without connecting to Leaf or real media.
+The local visual harness is `pnpm run dev` from `web/`; in development only, it reads `artifacts/portrait/portrait-preview.json` so Playwright can exercise the accepted Nova pack without installing the extension or contacting Leaf. `node tests/visual.cjs` captures desktop and phone evidence. Production builds do not copy the harness preview.
 
 ## Loading after review
 

@@ -11,7 +11,8 @@ public sealed class PixooService(
     EmulatorSink emulator,
     Pixoo64Sink hardware,
     IPushClock clock,
-    IAgentEventMapper mapper)
+    IAgentEventMapper mapper,
+    PortraitPackService portraits)
 {
     public const string DeviceEntityType = "pixoo-device";
     private readonly ConcurrentDictionary<Guid, FaceStateMachine> states = new();
@@ -32,7 +33,9 @@ public sealed class PixooService(
         var list = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType,
             DataEquals = new Dictionary<string, object?> { ["owner_id"] = caller.UserId }, Limit = 100 }, ct);
         if (caller.AgentId is not null) list = list.Where(item => item.Data["agent_id"]?.GetValue<string>() == caller.AgentId).ToArray();
-        return list.Select(Decode).ToArray();
+        var devices = list.Select(Decode).ToArray();
+        foreach (var agentId in devices.Select(item => item.AgentId).Distinct()) portraits.Schedule(agentId);
+        return devices;
     }
 
     public async Task<DeviceSnapshot?> SnapshotAsync(PixooCaller caller, Guid? requested, CancellationToken ct)
@@ -40,10 +43,11 @@ public sealed class PixooService(
         var devices = await DevicesAsync(caller, ct);
         var device = requested is { } id ? devices.FirstOrDefault(d => d.Id == id) : devices.FirstOrDefault();
         if (device is null) return null;
+        portraits.Schedule(device.AgentId);
         var snapshot = emulator.Snapshot(device);
         if (snapshot.Frames.Count > 0) return snapshot;
         var state = states.GetOrAdd(device.Id, _ => new());
-        var loop = renderer.Render(state.Current, device.AgentColor, device.Brightness, state.Gesture);
+        var loop = renderer.Render(device.AgentId, state.Current, device.AgentColor, device.Brightness, state.Gesture);
         return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = loop.Frames };
     }
 
@@ -52,6 +56,7 @@ public sealed class PixooService(
         var validated = await Validate(caller, request, ct);
         var created = await entities.CreateAsync(DeviceEntityType, validated.Name, Encode(caller.UserId, validated), ct);
         var device = Decode(created);
+        portraits.Schedule(device.AgentId);
         await Push(device, FaceState.Resting, null, "device.created", ct);
         return device;
     }
@@ -64,6 +69,7 @@ public sealed class PixooService(
         var validated = await Validate(caller, request, ct);
         var updated = await entities.ReplaceDataAsync(id, Encode(caller.UserId, validated), validated.Name, ct);
         var device = Decode(updated);
+        portraits.Schedule(device.AgentId);
         await Push(device, states.GetOrAdd(id, _ => new()).Current, null, "device.updated", ct);
         return device;
     }
@@ -87,11 +93,33 @@ public sealed class PixooService(
         return (await SnapshotAsync(caller, device.Id, ct))!;
     }
 
+    public async Task<PortraitPackStatus> RebuildPortraitAsync(PixooCaller caller, Guid agentId, bool force, CancellationToken ct)
+    {
+        if (!(await AgentsAsync(caller, ct)).Any(agent => agent.Id == agentId)) throw new KeyNotFoundException("Agent not found.");
+        await portraits.RebuildAsync(agentId, force, ct);
+        return portraits.Status(agentId);
+    }
+
+    public async Task RefreshPortraitAsync(Guid agentId)
+    {
+        var entitiesForAgent = await entities.QueryAsync(new EntityQuery
+        {
+            TypeSlug = DeviceEntityType,
+            DataEquals = new Dictionary<string, object?> { ["agent_id"] = agentId.ToString() },
+            Limit = 100,
+        }, CancellationToken.None);
+        foreach (var device in entitiesForAgent.Select(Decode))
+        {
+            var state = states.GetOrAdd(device.Id, _ => new());
+            await Push(device, state.Current, state.Gesture, "portrait.pack.updated", CancellationToken.None);
+        }
+    }
+
     private async Task Push(PixooDevice device, FaceState state, FaceGesture? gesture, string cause, CancellationToken ct)
     {
         var machine = states.GetOrAdd(device.Id, _ => new());
-        if (!machine.Apply(new(device.AgentId, state, gesture, cause)) && cause != "device.updated") return;
-        var loop = renderer.Render(state, device.AgentColor, device.Brightness, gesture);
+        if (!machine.Apply(new(device.AgentId, state, gesture, cause)) && cause is not ("device.updated" or "portrait.pack.updated")) return;
+        var loop = renderer.Render(device.AgentId, state, device.AgentColor, device.Brightness, gesture);
         var epoch = gestureEpochs.AddOrUpdate(device.Id, 1, (_, value) => value + 1);
         var hardwareOutput = device.Kind == DeviceKind.Pixoo64 && device.HardwareEnabled;
         if (queues.TryGetValue(device.Id, out var existing) && existing.Hardware != hardwareOutput

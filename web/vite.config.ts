@@ -5,6 +5,7 @@ import {federation} from '@module-federation/vite'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig(({command})=>({
+  publicDir:command==='serve'?fileURLToPath(new URL('../artifacts/portrait',import.meta.url)):false,
   resolve:{dedupe:['react','react-dom']},
   plugins:[react(),tailwindcss(), ...(command==='build' ? [federation({
     name:'pixoo',filename:'remoteEntry.js',exposes:{'.':'./src/index.tsx'},

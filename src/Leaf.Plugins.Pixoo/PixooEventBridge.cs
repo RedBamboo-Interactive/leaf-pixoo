@@ -8,7 +8,7 @@ namespace Leaf.Plugins.Pixoo;
 /// IPluginEvents. In the current kernel, Compute events are only relayed to /ws,
 /// so this bridge deliberately produces no guessed attribution.
 /// </summary>
-public sealed class PixooEventBridge(IPluginEvents events, PixooService service) : IDisposable
+public sealed class PixooEventBridge(IPluginEvents events, PixooService service, PortraitPackService portraits) : IDisposable
 {
     private readonly List<IDisposable> subscriptions = [];
 
@@ -17,6 +17,18 @@ public sealed class PixooEventBridge(IPluginEvents events, PixooService service)
         if (subscriptions.Count > 0) return;
         foreach (var type in new[] { "session.created", "session.updated", "session.stream", "session.ended", "job.updated" })
             subscriptions.Add(events.Subscribe(type, Handle));
+        subscriptions.Add(events.Subscribe("entity.updated", HandlePortrait));
+        subscriptions.Add(events.Subscribe("agent.avatar-changed", HandlePortrait));
+    }
+
+    private async Task HandlePortrait(PluginEvent evt)
+    {
+        if (evt.EventType == "agent.avatar-changed")
+        {
+            if (Guid.TryParse(Str(evt.Payload, "agentId"), out var agentId)) portraits.Schedule(agentId, sourceChanged: true);
+            return;
+        }
+        await portraits.HandleEntityUpdatedAsync(evt.Payload, CancellationToken.None);
     }
 
     internal Task Handle(PluginEvent evt)

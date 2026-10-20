@@ -35,6 +35,8 @@
     ]
   },
   "permissions": [
+    { "kind": "net", "target": "127.0.0.1:18804", "reason": "Submit bounded portrait redraws to the installed reference workflow using a plugin-scoped signed execution identity" },
+    { "kind": "net", "target": "127.0.0.1:18800", "reason": "Wait on and download the exact admitted RedCompute portrait job" },
     { "kind": "net", "target": "configured-pixoo-host", "reason": "Optional untested local HTTP control of an explicitly configured Pixoo-64; disabled by default" }
   ]
 }

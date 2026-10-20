@@ -6,6 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+  <ItemGroup><PackageReference Include="SkiaSharp" Version="3.119.0" /></ItemGroup>
   <ItemGroup Condition="'$(LeafSdkAssembly)' != ''"><Reference Include="Leaf.Sdk"><HintPath>$(LeafSdkAssembly)</HintPath><Private>false</Private></Reference></ItemGroup>
   <ItemGroup Condition="'$(LeafSdkAssembly)' == '' and '$(LeafSdkProject)' != ''"><ProjectReference Include="$(LeafSdkProject)"><Private>false</Private></ProjectReference></ItemGroup>
   <Target Name="RequireCurrentSdk" BeforeTargets="ResolveReferences" Condition="'$(LeafSdkAssembly)' == '' and '$(LeafSdkProject)' == ''">

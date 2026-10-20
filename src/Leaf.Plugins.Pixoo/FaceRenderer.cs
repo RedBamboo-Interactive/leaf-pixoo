@@ -2,12 +2,12 @@ namespace Leaf.Plugins.Pixoo;
 
 public interface IFaceRenderer
 {
-    FrameLoop Render(FaceState state, string color, int brightness, FaceGesture? gesture = null);
+    FrameLoop Render(Guid agentId, FaceState state, string color, int brightness, FaceGesture? gesture = null);
 }
 
 public sealed class ProceduralFaceRenderer : IFaceRenderer
 {
-    public FrameLoop Render(FaceState state, string color, int brightness, FaceGesture? gesture = null)
+    public FrameLoop Render(Guid agentId, FaceState state, string color, int brightness, FaceGesture? gesture = null)
     {
         var rgb = ParseColor(color);
         var levels = state switch

@@ -33,7 +33,7 @@ public sealed class PixooPayloadTests
     [InlineData(FaceState.Dark)]
     public void Renderer_always_produces_device_sized_frames(FaceState state)
     {
-        var loop = new ProceduralFaceRenderer().Render(state, "#78e6c4", 75);
+        var loop = new ProceduralFaceRenderer().Render(Guid.Empty, state, "#78e6c4", 75);
         Assert.NotEmpty(loop.Frames);
         Assert.All(loop.Frames, frame => Assert.Equal(64 * 64 * 3, frame.Pixels.Length));
     }

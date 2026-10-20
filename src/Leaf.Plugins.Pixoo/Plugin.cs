@@ -25,21 +25,38 @@ public sealed class PixooPlugin : ILeafPlugin
     public void ConfigureServices(IServiceCollection services, PluginContext ctx)
     {
         services.AddSingleton<IPushClock, SystemPushClock>();
-        services.AddSingleton<IFaceRenderer, ProceduralFaceRenderer>();
+        services.AddSingleton<ProceduralFaceRenderer>();
         services.AddSingleton<IAgentEventMapper, StrictAgentEventMapper>();
         services.AddSingleton<EmulatorSink>();
         services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(4) });
         services.AddSingleton<Pixoo64Sink>();
-        services.AddSingleton(sp => new PixooService(
+        services.AddSingleton(sp => new PortraitPackService(
             sp.GetRequiredKeyedService<IEntityStore>(Id),
-            sp.GetRequiredService<IFaceRenderer>(),
-            sp.GetRequiredService<EmulatorSink>(),
-            sp.GetRequiredService<Pixoo64Sink>(),
-            sp.GetRequiredService<IPushClock>(),
-            sp.GetRequiredService<IAgentEventMapper>()));
+            sp.GetRequiredKeyedService<IAssets>(Id),
+            sp.GetRequiredKeyedService<IExecutionTokens>(Id),
+            new HttpClient { Timeout = TimeSpan.FromSeconds(40) }));
+        services.AddSingleton<IPortraitPackCache>(sp => sp.GetRequiredService<PortraitPackService>());
+        services.AddSingleton<IFaceRenderer>(sp => new PortraitFaceRenderer(
+            sp.GetRequiredService<IPortraitPackCache>(),
+            sp.GetRequiredService<ProceduralFaceRenderer>()));
+        services.AddSingleton(sp =>
+        {
+            var portraits = sp.GetRequiredService<PortraitPackService>();
+            var service = new PixooService(
+                sp.GetRequiredKeyedService<IEntityStore>(Id),
+                sp.GetRequiredService<IFaceRenderer>(),
+                sp.GetRequiredService<EmulatorSink>(),
+                sp.GetRequiredService<Pixoo64Sink>(),
+                sp.GetRequiredService<IPushClock>(),
+                sp.GetRequiredService<IAgentEventMapper>(),
+                portraits);
+            portraits.PackReady += service.RefreshPortraitAsync;
+            return service;
+        });
         services.AddSingleton(sp => new PixooEventBridge(
             sp.GetRequiredKeyedService<IPluginEvents>(Id),
-            sp.GetRequiredService<PixooService>()));
+            sp.GetRequiredService<PixooService>(),
+            sp.GetRequiredService<PortraitPackService>()));
     }
 
     public Task OnStartupAsync(IPluginHost host, CancellationToken ct)
@@ -79,6 +96,11 @@ public sealed class PixooPlugin : ILeafPlugin
             var request = await Read<SimulateRequest>(context, ct);
             return Results.Ok(await service.SimulateAsync(PixooCaller.From(context.User), id, request.State, request.Gesture, ct));
         });
+        group.MapPost("/portrait/rebuild", async (HttpContext context, PixooService service, CancellationToken ct) =>
+        {
+            var request = await Read<PortraitRebuildRequest>(context, ct);
+            return Results.Ok(await service.RebuildPortraitAsync(PixooCaller.From(context.User), request.AgentId, request.Force, ct));
+        });
     }
 
     private static async Task<T> Read<T>(HttpContext context, CancellationToken ct)
@@ -86,4 +108,5 @@ public sealed class PixooPlugin : ILeafPlugin
             ?? throw new BadHttpRequestException("JSON body required.");
 
     public sealed record SimulateRequest(FaceState State, FaceGesture? Gesture);
+    public sealed record PortraitRebuildRequest(Guid AgentId, bool Force = false);
 }

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 (async () => {
-  const artifacts = path.resolve(__dirname, '../artifacts');
+  const artifacts = path.resolve(__dirname, '../artifacts/portrait');
   fs.mkdirSync(artifacts, { recursive: true });
   for (const name of fs.readdirSync(artifacts)) {
     if (/^pixoo-.*\.png$/.test(name)) fs.unlinkSync(path.join(artifacts, name));
@@ -22,7 +22,7 @@ const path = require('node:path');
       await page.setViewportSize({ width: 1440, height: 1000 });
       await page.goto(`http://127.0.0.1:4173/?harness=1&theme=${theme}`, { waitUntil: 'networkidle' });
       await page.getByRole('main').waitFor();
-      for (const state of ['resting', 'speaking']) {
+      for (const state of ['resting', 'speaking', 'dreaming']) {
         await page.getByRole('button', { name: state, exact: true }).click();
         await page.getByTestId('current-state').getByText(state, { exact: true }).waitFor();
         await page.evaluate(() => window.scrollTo(0, 0));
@@ -30,7 +30,7 @@ const path = require('node:path');
       }
 
       await page.setViewportSize({ width: 390, height: 844 });
-      for (const state of ['resting', 'speaking']) {
+      for (const state of ['resting', 'speaking', 'dreaming']) {
         await page.getByRole('button', { name: state, exact: true }).click();
         await page.getByTestId('current-state').getByText(state, { exact: true }).waitFor();
         await page.evaluate(() => window.scrollTo(0, 0));
@@ -45,7 +45,7 @@ const path = require('node:path');
     await page.getByTestId('current-state').getByText('speaking', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(artifacts, 'pixoo-nova-section-dark-speaking.png') });
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log(JSON.stringify({ screenshots: 9, realMediaRequests: 0, errors: 0 }));
+    console.log(JSON.stringify({ screenshots: 13, realMediaRequests: 0, errors: 0 }));
   } finally {
     await browser.close();
   }
