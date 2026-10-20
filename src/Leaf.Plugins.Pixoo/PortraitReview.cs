@@ -111,17 +111,19 @@ public static class PortraitReview
     private static byte[] BlinkEyeContactSheet(PortraitPack pack, int scale)
     {
         var open = pack.BasePixels.ToArray();
+        var half = pack.BasePixels.ToArray();
         var closed = pack.BasePixels.ToArray();
+        PortraitAnimation.ApplyBlink(half, pack.Regions, pack.Landmarks, .5);
         PortraitAnimation.ApplyBlink(closed, pack.Regions, pack.Landmarks);
         var eyes = new[] { pack.Regions.LeftEye, pack.Regions.RightEye };
         var tileWidth = eyes.Max(eye => eye.Width + 2) * scale;
         var tileHeight = eyes.Max(eye => eye.Height + 2) * scale;
-        using var sheet = new SKBitmap(tileWidth * 4, tileHeight, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        using var sheet = new SKBitmap(tileWidth * 10, tileHeight, SKColorType.Rgba8888, SKAlphaType.Opaque);
         using var canvas = new SKCanvas(sheet);
         canvas.Clear(SKColors.Black);
         var index = 0;
         foreach (var eye in eyes)
-        foreach (var pixels in new[] { open, closed })
+        foreach (var pixels in new[] { open, half, closed, half, open })
         {
             using var crop = Crop(pixels, eye, 1);
             using var enlarged = crop.Resize(new SKSizeI(crop.Width * scale, crop.Height * scale),

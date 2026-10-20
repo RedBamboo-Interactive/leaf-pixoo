@@ -40,9 +40,10 @@ public static class PortraitAnimation
             FaceState.Resting => Enumerable.Range(0, 12).Select(phase =>
             {
                 var pixels = baseFrame.ToArray();
-                if (phase == 9) ApplyBlink(pixels, pack.Regions, pack.Landmarks);
+                var blink = phase switch { 8 or 10 => .5, 9 => 1, _ => 0 };
+                if (blink > 0) ApplyBlink(pixels, pack.Regions, pack.Landmarks, blink);
                 var breathing = .985 + .025 * Math.Sin(phase / 12d * Math.PI * 2);
-                return Frame(pixels, brightness * breathing, phase == 9 ? 120 : 700);
+                return Frame(pixels, brightness * breathing, blink > 0 ? 120 : 700);
             }).ToArray(),
             FaceState.Listening => new[] { 1.06, 1.10 }.Select(level =>
             {
@@ -80,10 +81,13 @@ public static class PortraitAnimation
         return new FrameLoop(frames).Validate();
     }
 
-    internal static void ApplyBlink(byte[] pixels, PortraitRegions regions, PortraitLandmarks? landmarks = null)
+    internal static void ApplyBlink(byte[] pixels, PortraitRegions regions, PortraitLandmarks? landmarks = null,
+        double closure = 1)
     {
-        BlinkEye(pixels, regions.LeftEye, regions.Face);
-        BlinkEye(pixels, regions.RightEye, regions.Face);
+        closure = Math.Clamp(closure, 0, 1);
+        if (closure <= 0) return;
+        BlinkEye(pixels, landmarks?.LeftEyeOutline ?? RectangleOutline(regions.LeftEye), regions.Face, closure);
+        BlinkEye(pixels, landmarks?.RightEyeOutline ?? RectangleOutline(regions.RightEye), regions.Face, closure);
     }
 
     internal static void ApplyMouthShape(byte[] pixels, PortraitRegions regions, int shape,
@@ -145,15 +149,70 @@ public static class PortraitAnimation
     private static RgbFrame Frame(byte[] pixels, double brightness, int duration)
         => new(Scale(pixels, Math.Clamp(brightness, 0, 100) / 100d), duration);
 
-    private static void BlinkEye(byte[] pixels, PixelRegion eye, PixelRegion face)
+    private static void BlinkEye(byte[] pixels, PixelPoint[] outline, PixelRegion face, double closure)
     {
-        var core = EyeCore(pixels, eye);
-        var skin = SampleSurrounding(pixels, core, face);
-        var lid = Darken(skin, .62);
-        Fill(pixels, core, skin);
-        var y = core.Y + core.Height / 2;
-        for (var x = core.X; x < core.Right; x++) Put(pixels, x, y, lid);
+        var columns = RasterizePolygon(outline).GroupBy(point => point.X).OrderBy(column => column.Key).ToArray();
+        if (columns.Length == 0) return;
+        var skin = SampleAboveEye(pixels, columns, face);
+        var lash = Darken(skin, .52);
+        foreach (var column in columns)
+        {
+            var top = column.Min(point => point.Y);
+            var bottom = column.Max(point => point.Y);
+            var height = bottom - top + 1;
+            var covered = Math.Clamp((int)Math.Ceiling(height * closure), 1, height);
+            var lidEdge = top + covered - 1;
+            for (var y = top; y <= lidEdge; y++) Put(pixels, column.Key, y, skin);
+            Put(pixels, column.Key, lidEdge, lash);
+        }
     }
+
+    internal static IReadOnlyList<PixelPoint> RasterizePolygon(PixelPoint[] outline)
+    {
+        if (outline.Length < 3) return [];
+        var minX = Math.Max(0, outline.Min(point => point.X));
+        var maxX = Math.Min(63, outline.Max(point => point.X));
+        var minY = Math.Max(0, outline.Min(point => point.Y));
+        var maxY = Math.Min(63, outline.Max(point => point.Y));
+        var pixels = new List<PixelPoint>();
+        for (var y = minY; y <= maxY; y++)
+        for (var x = minX; x <= maxX; x++)
+            if (OnBoundary(outline, x, y) || InsidePolygon(outline, x, y)) pixels.Add(new(x, y));
+        return pixels;
+    }
+
+    private static bool OnBoundary(PixelPoint[] polygon, int x, int y)
+    {
+        for (var index = 0; index < polygon.Length; index++)
+        {
+            var a = polygon[index];
+            var b = polygon[(index + 1) % polygon.Length];
+            var cross = (long)(x - a.X) * (b.Y - a.Y) - (long)(y - a.Y) * (b.X - a.X);
+            if (cross == 0 && x >= Math.Min(a.X, b.X) && x <= Math.Max(a.X, b.X)
+                && y >= Math.Min(a.Y, b.Y) && y <= Math.Max(a.Y, b.Y)) return true;
+        }
+        return false;
+    }
+
+    private static bool InsidePolygon(PixelPoint[] polygon, int x, int y)
+    {
+        var inside = false;
+        for (int index = 0, previous = polygon.Length - 1; index < polygon.Length; previous = index++)
+        {
+            var a = polygon[index];
+            var b = polygon[previous];
+            if ((a.Y > y) == (b.Y > y)) continue;
+            var crossing = (b.X - a.X) * (y - a.Y) / (double)(b.Y - a.Y) + a.X;
+            if (x < crossing) inside = !inside;
+        }
+        return inside;
+    }
+
+    private static PixelPoint[] RectangleOutline(PixelRegion region) =>
+    [
+        new(region.X, region.Y), new(region.Right - 1, region.Y),
+        new(region.Right - 1, region.Bottom - 1), new(region.X, region.Bottom - 1),
+    ];
 
     private static PixelRegion EyeCore(byte[] pixels, PixelRegion search)
     {
@@ -224,21 +283,27 @@ public static class PortraitAnimation
         }
     }
 
-    private static (byte R, byte G, byte B) SampleSurrounding(byte[] pixels, PixelRegion region, PixelRegion face)
+    private static (byte R, byte G, byte B) SampleAboveEye(byte[] pixels,
+        IEnumerable<IGrouping<int, PixelPoint>> columns, PixelRegion face)
     {
-        long r = 0, g = 0, b = 0, count = 0;
-        for (var y = Math.Max(face.Y, region.Y - 2); y < Math.Min(face.Bottom, region.Bottom + 2); y++)
-        for (var x = Math.Max(face.X, region.X - 2); x < Math.Min(face.Right, region.Right + 2); x++)
+        var samples = new List<(byte R, byte G, byte B, double Luminance)>();
+        foreach (var column in columns)
         {
-            if (region.Contains(x, y)) continue;
-            var i = (y * 64 + x) * 3; r += pixels[i]; g += pixels[i + 1]; b += pixels[i + 2]; count++;
+            var top = column.Min(point => point.Y);
+            for (var y = Math.Max(face.Y, top - 2); y < top; y++)
+            {
+                if (!face.Contains(column.Key, y)) continue;
+                var i = (y * 64 + column.Key) * 3;
+                var r = pixels[i]; var g = pixels[i + 1]; var b = pixels[i + 2];
+                samples.Add((r, g, b, .2126 * r + .7152 * g + .0722 * b));
+            }
         }
-        return count == 0 ? ((byte)128, (byte)96, (byte)80) : ((byte)(r / count), (byte)(g / count), (byte)(b / count));
-    }
-
-    private static void Fill(byte[] pixels, PixelRegion region, (byte R, byte G, byte B) color)
-    {
-        for (var y = region.Y; y < region.Bottom; y++) for (var x = region.X; x < region.Right; x++) Put(pixels, x, y, color);
+        if (samples.Count == 0) return (128, 96, 80);
+        var skin = samples.OrderByDescending(sample => sample.Luminance)
+            .Take(Math.Max(1, (int)Math.Ceiling(samples.Count * .67))).ToArray();
+        return ((byte)Math.Round(skin.Average(sample => sample.R)),
+            (byte)Math.Round(skin.Average(sample => sample.G)),
+            (byte)Math.Round(skin.Average(sample => sample.B)));
     }
 
     private static void Put(byte[] pixels, int x, int y, (byte R, byte G, byte B) color)

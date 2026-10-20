@@ -165,6 +165,56 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
+    public void Closed_blink_repaints_every_eye_polygon_pixel_without_retaining_iris_or_pupil_colours()
+    {
+        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
+        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
+            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var regions = landmarks.ApplyTo(scaffold);
+        var basePixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var closed = basePixels.ToArray();
+        PortraitAnimation.ApplyBlink(closed, regions, landmarks);
+
+        foreach (var outline in new[] { landmarks.LeftEyeOutline, landmarks.RightEyeOutline })
+        {
+            var polygon = PortraitAnimation.RasterizePolygon(outline);
+            var irisAndPupilColours = polygon.Select(point => Color(basePixels, point))
+                .OrderBy(color => .2126 * color.R + .7152 * color.G + .0722 * color.B)
+                .Take(Math.Max(1, polygon.Count / 3)).ToHashSet();
+            Assert.All(polygon, point => Assert.DoesNotContain(Color(closed, point), irisAndPupilColours));
+        }
+    }
+
+    [Fact]
+    public void Resting_blink_sequence_is_open_half_closed_half_open()
+    {
+        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
+        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
+            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var regions = landmarks.ApplyTo(scaffold);
+        var pixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var mask = FigureMaskBuilder.Build(regions);
+        var pack = new PortraitPack(pixels, pixels, mask, regions,
+            new PortraitProvenance("source", "hash", PortraitPackBuilder.PipelineVersion, "test", 1, DateTimeOffset.UnixEpoch, null),
+            PaletteQuantizer.CountColors(pixels), 100,
+            new PortraitColorMatchMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), Landmarks: landmarks);
+        var frames = PortraitAnimation.Render(pack, FaceState.Resting, "#9a7cff", 100).Frames;
+        var polygon = PortraitAnimation.RasterizePolygon(landmarks.LeftEyeOutline);
+        var changed = frames.Select(frame =>
+        {
+            var factor = UniformFactor(pixels, frame.Pixels, mask, regions);
+            var expected = pixels.Select(value => (byte)Math.Clamp(Math.Round(value * factor), 0, 255)).ToArray();
+            return polygon.Count(point => PixelChanged(expected, frame.Pixels, point.X, point.Y));
+        }).ToArray();
+
+        Assert.Equal(0, changed[7]);
+        Assert.InRange(changed[8], 1, changed[9] - 1);
+        Assert.True(changed[9] > changed[8]);
+        Assert.Equal(changed[8], changed[10]);
+        Assert.Equal(0, changed[11]);
+    }
+
+    [Fact]
     public void Source_hash_change_invalidates_the_pack_cache_key()
     {
         var original = PortraitSourceFingerprint.Hash([1, 2, 3]);
@@ -306,6 +356,12 @@ public sealed class PortraitPipelineTests
     {
         var i = (y * 64 + x) * 3;
         return before[i] != after[i] || before[i + 1] != after[i + 1] || before[i + 2] != after[i + 2];
+    }
+
+    private static (byte R, byte G, byte B) Color(byte[] pixels, PixelPoint point)
+    {
+        var i = (point.Y * 64 + point.X) * 3;
+        return (pixels[i], pixels[i + 1], pixels[i + 2]);
     }
 
     private static int ChangedColumns(byte[] before, byte[] after, PixelRegion region)
