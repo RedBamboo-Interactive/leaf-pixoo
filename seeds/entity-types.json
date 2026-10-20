@@ -1,0 +1,13 @@
+[
+  {
+    "typeSlug": "entity-type",
+    "slug": "pixoo-device",
+    "name": "Pixoo Display",
+    "data": {
+      "icon": "ph-smiley",
+      "color": "violet",
+      "versioning": true,
+      "description": "A 64x64 emulator or explicitly configured Pixoo-64, bound to exactly one Agent entity."
+    }
+  }
+]

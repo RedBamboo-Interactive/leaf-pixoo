@@ -1,0 +1,25 @@
+{
+  "id": "pixoo",
+  "name": "Leaf Pixoo",
+  "version": "0.1.0",
+  "kernelApi": "^0.1.0",
+  "description": "A quiet 64x64 peripheral face for one bound Agent, with a faithful Pixoo emulator.",
+  "icon": "ph-smiley",
+  "color": "violet",
+  "requires": ["entities"],
+  "backend": {
+    "assembly": "Leaf.Plugins.Pixoo",
+    "apiNamespace": "extensions"
+  },
+  "frontend": {
+    "package": "@redbamboo/plugin-pixoo",
+    "route": "/apps/pixoo",
+    "pwa": false,
+    "sections": [
+      { "id": "emulator", "name": "Face", "icon": "ph-smiley", "path": "emulator", "order": 1, "default": true }
+    ]
+  },
+  "permissions": [
+    { "kind": "net", "target": "configured-pixoo-host", "reason": "Optional untested local HTTP control of an explicitly configured Pixoo-64; disabled by default" }
+  ]
+}

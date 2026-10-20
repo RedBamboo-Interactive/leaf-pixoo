@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup Condition="'$(PixooArtifacts)' != ''">
+    <BaseIntermediateOutputPath>$(PixooArtifacts)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(PixooArtifacts)/bin/$(MSBuildProjectName)/</BaseOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin/**;obj/**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

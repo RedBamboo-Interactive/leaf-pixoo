@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net9.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5"><PrivateAssets>all</PrivateAssets></PackageReference>
+    <ProjectReference Include="../../src/Leaf.Plugins.Pixoo/Leaf.Plugins.Pixoo.csproj" />
+    <Reference Include="Leaf.Sdk" Condition="'$(LeafSdkAssembly)' != ''"><HintPath>$(LeafSdkAssembly)</HintPath></Reference>
+  </ItemGroup>
+</Project>

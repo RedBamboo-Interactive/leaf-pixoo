@@ -1,0 +1,11 @@
+[
+  {"parentType":"pixoo-device","slug":"owner_id","name":"Human owner","fieldType":"string","isRequired":true,"sortOrder":0,"description":"Signed beneficiary subject; never caller-selected."},
+  {"parentType":"pixoo-device","slug":"name","name":"Name","fieldType":"string","isRequired":true,"sortOrder":1},
+  {"parentType":"pixoo-device","slug":"kind","name":"Kind","fieldType":"string","isRequired":true,"sortOrder":2,"constraints":"{\"enum\":[\"emulator\",\"pixoo64\"]}"},
+  {"parentType":"pixoo-device","slug":"host","name":"Host","fieldType":"string","isRequired":false,"sortOrder":3,"description":"Explicit LAN host for untested hardware; never discovered."},
+  {"parentType":"pixoo-device","slug":"brightness","name":"Brightness","fieldType":"number","isRequired":true,"sortOrder":4},
+  {"parentType":"pixoo-device","slug":"agent_id","name":"Bound Agent","fieldType":"entity_ref","isRequired":true,"sortOrder":5,"constraints":"{\"target_type\":\"agent\"}"},
+  {"parentType":"pixoo-device","slug":"agent_color","name":"Agent colour snapshot","fieldType":"string","isRequired":true,"sortOrder":6},
+  {"parentType":"pixoo-device","slug":"minimum_push_gap_ms","name":"Minimum push gap","fieldType":"number","isRequired":true,"sortOrder":7},
+  {"parentType":"pixoo-device","slug":"hardware_enabled","name":"Hardware enabled","fieldType":"boolean","isRequired":true,"sortOrder":8}
+]

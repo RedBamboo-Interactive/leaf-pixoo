@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' != ''"><Reference Include="Leaf.Sdk"><HintPath>$(LeafSdkAssembly)</HintPath><Private>false</Private></Reference></ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkAssembly)' == '' and '$(LeafSdkProject)' != ''"><ProjectReference Include="$(LeafSdkProject)"><Private>false</Private></ProjectReference></ItemGroup>
+  <Target Name="RequireCurrentSdk" BeforeTargets="ResolveReferences" Condition="'$(LeafSdkAssembly)' == '' and '$(LeafSdkProject)' == ''">
+    <Error Text="Set LeafSdkProject to the canonical RedLeaf SDK project, or LeafSdkAssembly to an isolated build." />
+  </Target>
+  <ItemGroup><EmbeddedResource Include="../../plugin.json" LogicalName="plugin.json" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="Leaf.Plugins.Pixoo.Tests" /></ItemGroup>
+</Project>
