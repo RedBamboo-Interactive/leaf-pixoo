@@ -28,19 +28,29 @@ if (args[0] == "prepare")
     return 0;
 }
 
-if (args.Length != 5 || !long.TryParse(args[3], out var seed))
+if (args.Length < 5 || !long.TryParse(args[3], out var seed))
 {
-    Console.Error.WriteLine("Usage: build <source> <candidate> <seed> <output-dir>");
+    Console.Error.WriteLine("Usage: build <source> <candidate> <seed> <output-dir> [--palette=N] [--background-calm=0..0.5]");
     return 2;
 }
 
 var candidatePath = Path.GetFullPath(args[2]);
 var outputDir = Path.GetFullPath(args[4]);
 Directory.CreateDirectory(outputDir);
+int? paletteColors = null;
+double backgroundCalmAmount = 0;
+foreach (var option in args.Skip(5))
+{
+    if (option.StartsWith("--palette=", StringComparison.Ordinal) && int.TryParse(option[10..], out var palette)) paletteColors = palette;
+    else if (option.StartsWith("--background-calm=", StringComparison.Ordinal)
+        && double.TryParse(option[18..], System.Globalization.CultureInfo.InvariantCulture, out var calm)) backgroundCalmAmount = calm;
+    else { Console.Error.WriteLine($"Unknown reduction option: {option}"); return 2; }
+}
+var reductionOptions = new PortraitReductionOptions(paletteColors, backgroundCalmAmount);
 var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
 var preparedPortrait = builder.Prepare(sourceBytes);
 var pack = builder.Build(await File.ReadAllBytesAsync(candidatePath), preparedPortrait,
-    "815d29b8-3bf4-443f-81ca-ba9263d1ee9f.png", PortraitPackService.Workflow, seed, DateTimeOffset.UtcNow);
+    "815d29b8-3bf4-443f-81ca-ba9263d1ee9f.png", PortraitPackService.Workflow, seed, DateTimeOffset.UtcNow, reductionOptions);
 foreach (var artifact in PortraitReview.Create(pack, preparedPortrait.CropPng, "#9a7cff"))
     await File.WriteAllBytesAsync(Path.Combine(outputDir, artifact.FileName), artifact.Bytes);
 await File.WriteAllBytesAsync(Path.Combine(outputDir, "source-crop.png"), preparedPortrait.CropPng);
@@ -66,11 +76,12 @@ var preview = new JsonObject
     ["faceContrast"] = pack.FaceContrast,
     ["regions"] = JsonSerializer.SerializeToNode(pack.Regions),
     ["colorMatch"] = JsonSerializer.SerializeToNode(pack.ColorMatch),
+    ["reductionOptions"] = JsonSerializer.SerializeToNode(pack.ReductionOptions),
     ["states"] = states,
 };
 await File.WriteAllTextAsync(Path.Combine(outputDir, "portrait-preview.json"),
     preview.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-Console.WriteLine(JsonSerializer.Serialize(new { seed, pack.PaletteSize, pack.FaceContrast, pack.Provenance.DetectedGridPitch, pack.ColorMatch }));
+Console.WriteLine(JsonSerializer.Serialize(new { seed, pack.PaletteSize, pack.FaceContrast, pack.Provenance.DetectedGridPitch, pack.ColorMatch, pack.ReductionOptions }));
 return 0;
 
 static long SeedFor(string hash, int attempt)

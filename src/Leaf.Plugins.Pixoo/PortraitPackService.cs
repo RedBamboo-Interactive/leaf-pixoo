@@ -234,7 +234,7 @@ public sealed class PortraitPackService(
         }
         var manifest = new JsonObject
         {
-            ["schema"] = "leaf.pixoo.portrait-pack/v2",
+            ["schema"] = "leaf.pixoo.portrait-pack/v3",
             ["pipelineVersion"] = pack.Provenance.PipelineVersion,
             ["sourceAssetId"] = source.AssetId,
             ["sourceHash"] = source.Hash,
@@ -247,6 +247,8 @@ public sealed class PortraitPackService(
             ["fallbackAsset"] = fallbackAsset.AssetId,
             ["figureMaskAsset"] = maskAsset.AssetId,
             ["paletteSize"] = pack.PaletteSize,
+            ["paletteLimit"] = JsonValue.Create(pack.ReductionOptions?.PaletteColors),
+            ["backgroundCalmAmount"] = pack.ReductionOptions?.BackgroundCalmAmount ?? 0,
             ["faceContrast"] = pack.FaceContrast,
             ["colorMatch"] = ColorMatchJson(pack.ColorMatch),
             ["regions"] = RegionsJson(pack.Regions),
@@ -271,6 +273,8 @@ public sealed class PortraitPackService(
             ["figure_mask_asset"] = maskAsset.AssetId,
             ["manifest_asset"] = manifestAsset.AssetId,
             ["palette_size"] = pack.PaletteSize,
+            ["palette_limit"] = JsonValue.Create(pack.ReductionOptions?.PaletteColors),
+            ["background_calm_amount"] = pack.ReductionOptions?.BackgroundCalmAmount ?? 0,
             ["face_contrast"] = pack.FaceContrast,
             ["color_match"] = ColorMatchJson(pack.ColorMatch),
             ["regions"] = RegionsJson(pack.Regions),
@@ -302,11 +306,13 @@ public sealed class PortraitPackService(
                 var provenance = new PortraitProvenance(Text(entity.Data, "source_asset_id") ?? "", hash, PortraitPackBuilder.PipelineVersion,
                     Text(entity.Data, "workflow") ?? Workflow, entity.Data["seed"]?.GetValue<long>() ?? 0,
                     entity.Data["generated_at"]?.GetValue<DateTimeOffset>() ?? entity.CreatedAt, null);
-                var validation = builder.Validate(basePixels, regions);
+                var paletteLimit = NullableInteger(entity.Data, "palette_limit");
+                var reductionOptions = new PortraitReductionOptions(paletteLimit, Number(entity.Data, "background_calm_amount"));
+                var validation = builder.Validate(basePixels, regions, paletteLimit);
                 var metrics = entity.Data["color_match"] is JsonObject storedMetrics
                     ? ColorMatch(storedMetrics)
                     : PortraitColorMatcher.Measure(basePixels, regions, mask, fallbackPixels, regions, mask);
-                if (validation.Valid) return new(basePixels, fallbackPixels, mask, regions, provenance, validation.PaletteSize, validation.FaceContrast, metrics);
+                if (validation.Valid) return new(basePixels, fallbackPixels, mask, regions, provenance, validation.PaletteSize, validation.FaceContrast, metrics, reductionOptions);
             }
             catch { /* Ignore malformed historical candidates. */ }
         }
@@ -363,11 +369,15 @@ public sealed class PortraitPackService(
         ["jacketHue"] = m.JacketHue, ["referenceJacketHue"] = m.ReferenceJacketHue,
         ["jacketLightness"] = m.JacketLightness, ["referenceJacketLightness"] = m.ReferenceJacketLightness,
         ["jacketSamples"] = m.JacketSamples,
+        ["jacketHueDelta"] = m.JacketHueDelta, ["jacketLightnessDelta"] = m.JacketLightnessDelta,
+        ["guardApplied"] = m.GuardApplied,
+        ["guardRegions"] = new JsonArray((m.GuardRegions ?? []).Select(region => (JsonNode)region).ToArray()),
     };
     private static PortraitColorMatchMetrics ColorMatch(JsonObject value) => new(
         Number(value, "hairHue"), Number(value, "referenceHairHue"), Number(value, "hairLightness"), Number(value, "referenceHairLightness"), Integer(value, "hairSamples"),
         Number(value, "garmentHue"), Number(value, "referenceGarmentHue"), Number(value, "garmentLightness"), Number(value, "referenceGarmentLightness"), Integer(value, "garmentSamples"),
-        Number(value, "jacketHue"), Number(value, "referenceJacketHue"), Number(value, "jacketLightness"), Number(value, "referenceJacketLightness"), Integer(value, "jacketSamples"));
+        Number(value, "jacketHue"), Number(value, "referenceJacketHue"), Number(value, "jacketLightness"), Number(value, "referenceJacketLightness"), Integer(value, "jacketSamples"),
+        Boolean(value, "guardApplied"), value["guardRegions"] is JsonArray regions ? regions.Select(item => item?.GetValue<string>() ?? "").Where(item => item.Length > 0).ToArray() : null);
     private static PortraitRegions Regions(JsonObject value) => new(Region(value, "face"), Region(value, "leftEye"), Region(value, "rightEye"), Region(value, "mouth"), Region(value, "torso"), Region(value, "subject"));
     private static PixelRegion Region(JsonObject value, string key)
     {
@@ -377,6 +387,8 @@ public sealed class PortraitPackService(
     private static string? Text(JsonObject value, string key) => value[key] is JsonValue node && node.TryGetValue<string>(out var text) ? text : null;
     private static double Number(JsonObject value, string key) => value[key]?.GetValue<double>() ?? 0;
     private static int Integer(JsonObject value, string key) => value[key]?.GetValue<int>() ?? 0;
+    private static int? NullableInteger(JsonObject value, string key) => value[key] is JsonValue node && node.TryGetValue<int>(out var number) ? number : null;
+    private static bool Boolean(JsonObject value, string key) => value[key] is JsonValue node && node.TryGetValue<bool>(out var flag) && flag;
     private static string CompactDescription(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return "not available";

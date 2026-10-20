@@ -88,20 +88,69 @@ public static class PortraitAnimation
 
     internal static void ApplyMouthShape(byte[] pixels, PortraitRegions regions, int shape)
     {
+        // The closed speaking frame is the accepted portrait byte-for-byte.
+        if (shape <= 0) return;
         var region = regions.Mouth;
-        var dark = Darken(Darkest(pixels, region), .48);
-        var centerX = region.X + region.Width / 2;
-        var centerY = region.Y + region.Height / 2;
-        var height = Math.Min(region.Height, shape switch { 0 => 1, 1 => 3, _ => 5 });
-        var top = Math.Clamp(centerY - height / 2, region.Y, region.Bottom - height);
+        var core = MouthCore(pixels, region);
+        var (interior, lip) = MouthColors(pixels, core);
+        var centerX = core.X + core.Width / 2;
+        var centerY = core.Y + core.Height / 2;
+        var height = Math.Min(region.Height, shape == 1 ? 1 : 2);
+        var width = Math.Min(region.Width, shape == 1 ? 4 : 6);
+        var top = Math.Clamp(centerY, region.Y, region.Bottom - height);
         for (var y = top; y < top + height; y++)
         {
             var row = y - top;
-            var edgeInset = height > 1 ? Math.Abs(row - height / 2) : 0;
-            var halfWidth = Math.Max(2, (int)Math.Round(region.Width * (shape == 0 ? .24 : .34))) - edgeInset;
-            for (var x = Math.Max(region.X, centerX - halfWidth); x <= Math.Min(region.Right - 1, centerX + halfWidth); x++)
-            Put(pixels, x, y, dark);
+            var rowWidth = height == 2 && row == 1 ? Math.Max(4, width - 2) : width;
+            var left = Math.Clamp(centerX - rowWidth / 2, region.X, region.Right - rowWidth);
+            for (var x = left; x < left + rowWidth; x++)
+                Put(pixels, x, y, x == left || x == left + rowWidth - 1 ? lip : interior);
         }
+    }
+
+    private static PixelRegion MouthCore(byte[] pixels, PixelRegion search)
+    {
+        var candidates = new List<(int X, int Y, double Score)>();
+        for (var y = search.Y; y < search.Bottom; y++)
+        for (var x = search.X; x < search.Right; x++)
+        {
+            var i = (y * 64 + x) * 3;
+            var r = pixels[i]; var g = pixels[i + 1]; var b = pixels[i + 2];
+            var luminance = .2126 * r + .7152 * g + .0722 * b;
+            var warmth = r - (g + b) / 2d;
+            if (r >= g && r >= b && warmth > 4)
+                candidates.Add((x, y, luminance - warmth * .7));
+        }
+        var selected = candidates.OrderBy(item => item.Score).Take(Math.Max(1, Math.Min(12, candidates.Count / 3))).ToArray();
+        var centerX = selected.Length == 0 ? search.X + search.Width / 2 : (int)Math.Round(selected.Average(item => item.X));
+        var centerY = selected.Length == 0 ? search.Y + search.Height / 2 : (int)Math.Round(selected.Average(item => item.Y));
+        return new PixelRegion(Math.Clamp(centerX - 3, search.X, Math.Max(search.X, search.Right - 6)),
+            Math.Clamp(centerY - 1, search.Y, Math.Max(search.Y, search.Bottom - 2)), Math.Min(6, search.Width), Math.Min(2, search.Height));
+    }
+
+    private static ((byte R, byte G, byte B) Interior, (byte R, byte G, byte B) Lip) MouthColors(byte[] pixels, PixelRegion region)
+    {
+        var colors = new List<(byte R, byte G, byte B, double L)>();
+        for (var y = region.Y; y < region.Bottom; y++)
+        for (var x = region.X; x < region.Right; x++)
+        {
+            var i = (y * 64 + x) * 3;
+            var r = pixels[i]; var g = pixels[i + 1]; var b = pixels[i + 2];
+            if (r >= g && r >= b) colors.Add((r, g, b, .2126 * r + .7152 * g + .0722 * b));
+        }
+        var sample = colors.OrderBy(color => color.L).Take(Math.Max(1, colors.Count / 2)).ToArray();
+        if (sample.Length == 0) return ((72, 34, 31), (118, 61, 52));
+        // Darken a sampled lip tone, but keep a readable warm red-brown instead of black.
+        var meanR = sample.Average(color => color.R);
+        var meanG = sample.Average(color => color.G);
+        var meanB = sample.Average(color => color.B);
+        var interior = ((byte)Math.Clamp(Math.Round(meanR * .62), 52, 112),
+            (byte)Math.Clamp(Math.Round(sample.Average(color => color.G) * .52), 24, 68),
+            (byte)Math.Clamp(Math.Round(sample.Average(color => color.B) * .52), 20, 62));
+        var lip = ((byte)Math.Clamp(Math.Round(meanR), 72, 164),
+            (byte)Math.Clamp(Math.Round(meanG), 30, 100),
+            (byte)Math.Clamp(Math.Round(meanB), 28, 92));
+        return (interior, lip);
     }
 
     internal static void ApplyEyeShift(byte[] pixels, PortraitRegions regions, int dx, int dy)
@@ -202,18 +251,6 @@ public static class PortraitAnimation
             var i = (y * 64 + x) * 3; r += pixels[i]; g += pixels[i + 1]; b += pixels[i + 2]; count++;
         }
         return count == 0 ? ((byte)128, (byte)96, (byte)80) : ((byte)(r / count), (byte)(g / count), (byte)(b / count));
-    }
-
-    private static (byte R, byte G, byte B) Darkest(byte[] pixels, PixelRegion region)
-    {
-        var best = (R: (byte)80, G: (byte)40, B: (byte)40); var bestL = double.MaxValue;
-        for (var y = region.Y; y < region.Bottom; y++)
-        for (var x = region.X; x < region.Right; x++)
-        {
-            var i = (y * 64 + x) * 3; var l = .2126 * pixels[i] + .7152 * pixels[i + 1] + .0722 * pixels[i + 2];
-            if (l < bestL) { bestL = l; best = (pixels[i], pixels[i + 1], pixels[i + 2]); }
-        }
-        return best;
     }
 
     private static void Fill(byte[] pixels, PixelRegion region, (byte R, byte G, byte B) color)

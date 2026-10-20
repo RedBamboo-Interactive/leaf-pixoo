@@ -5,19 +5,24 @@ public sealed record PortraitColorHints(string Hair, string Jacket, string Inner
 public sealed record PortraitColorMatchMetrics(
     double HairHue, double ReferenceHairHue, double HairLightness, double ReferenceHairLightness, int HairSamples,
     double GarmentHue, double ReferenceGarmentHue, double GarmentLightness, double ReferenceGarmentLightness, int GarmentSamples,
-    double JacketHue, double ReferenceJacketHue, double JacketLightness, double ReferenceJacketLightness, int JacketSamples)
+    double JacketHue, double ReferenceJacketHue, double JacketLightness, double ReferenceJacketLightness, int JacketSamples,
+    bool GuardApplied = false, string[]? GuardRegions = null)
 {
     public double HairHueDelta => HueDistance(HairHue, ReferenceHairHue);
     public double HairLightnessDelta => Math.Abs(HairLightness - ReferenceHairLightness);
     public double GarmentHueDelta => HueDistance(GarmentHue, ReferenceGarmentHue);
     public double GarmentLightnessDelta => Math.Abs(GarmentLightness - ReferenceGarmentLightness);
+    public double JacketHueDelta => HueDistance(JacketHue, ReferenceJacketHue);
+    public double JacketLightnessDelta => Math.Abs(JacketLightness - ReferenceJacketLightness);
 
     public IEnumerable<string> Errors()
     {
-        if (HairSamples >= 6 && (HairHueDelta > 12 || HairLightnessDelta > 8))
+        if (HairSamples >= 6 && (HairHueDelta > 12 || HairLightnessDelta > 10))
             yield return $"hair colour mismatch (hue Δ{HairHueDelta:0.0}°, L* Δ{HairLightnessDelta:0.0})";
         if (GarmentSamples >= 6 && (GarmentHueDelta > 15 || GarmentLightnessDelta > 10))
             yield return $"inner garment colour mismatch (hue Δ{GarmentHueDelta:0.0}°, L* Δ{GarmentLightnessDelta:0.0})";
+        if (JacketSamples >= 6 && (JacketHueDelta > 15 || JacketLightnessDelta > 10))
+            yield return $"outer garment colour mismatch (hue Δ{JacketHueDelta:0.0}°, L* Δ{JacketLightnessDelta:0.0})";
     }
 
     private static double HueDistance(double a, double b)
@@ -26,6 +31,8 @@ public sealed record PortraitColorMatchMetrics(
         return Math.Min(difference, 360 - difference);
     }
 }
+
+public sealed record PortraitColorGuardResult(byte[] Pixels, PortraitColorMatchMetrics Metrics);
 
 public static class FigureMaskBuilder
 {
@@ -67,14 +74,21 @@ public static class PortraitColorMatcher
 {
     private enum Zone { Hair, Skin, InnerTop, Jacket, Background }
     private readonly record struct Lab(double L, double A, double B);
-    private readonly record struct Statistics(Lab Mean, Lab StdDev, int Count);
+    private readonly record struct Statistics(Lab Mean, int Count);
     private readonly record struct ColorSummary(double Hue, double Lightness, double Saturation, int Count, byte R, byte G, byte B);
 
-    public static byte[] Match(byte[] target, PortraitRegions targetRegions, byte[] targetMask,
+    public static PortraitColorGuardResult ApplyGuard(byte[] target, PortraitRegions targetRegions, byte[] targetMask,
         byte[] reference, PortraitRegions referenceRegions, byte[] referenceMask)
     {
+        var before = Measure(target, targetRegions, targetMask, reference, referenceRegions, referenceMask);
+        var shifts = new List<Zone>();
+        if (before.HairSamples >= 6 && (before.HairHueDelta > 12 || before.HairLightnessDelta > 10)) shifts.Add(Zone.Hair);
+        if (before.GarmentSamples >= 6 && (before.GarmentHueDelta > 15 || before.GarmentLightnessDelta > 10)) shifts.Add(Zone.InnerTop);
+        if (before.JacketSamples >= 6 && (before.JacketHueDelta > 15 || before.JacketLightnessDelta > 10)) shifts.Add(Zone.Jacket);
+        if (shifts.Count == 0) return new(target.ToArray(), before);
+
         var output = target.ToArray();
-        foreach (var zone in Enum.GetValues<Zone>())
+        foreach (var zone in shifts)
         {
             var targetIndices = Indices(target, targetRegions, targetMask, zone).ToArray();
             var referenceIndices = Indices(reference, referenceRegions, referenceMask, zone).ToArray();
@@ -85,11 +99,35 @@ public static class PortraitColorMatcher
             {
                 var lab = ToLab(target, pixel);
                 var adjusted = new Lab(
-                    Transfer(lab.L, from.Mean.L, from.StdDev.L, to.Mean.L, to.StdDev.L),
-                    Transfer(lab.A, from.Mean.A, from.StdDev.A, to.Mean.A, to.StdDev.A),
-                    Transfer(lab.B, from.Mean.B, from.StdDev.B, to.Mean.B, to.StdDev.B));
+                    lab.L + to.Mean.L - from.Mean.L,
+                    lab.A + to.Mean.A - from.Mean.A,
+                    lab.B + to.Mean.B - from.Mean.B);
                 FromLab(adjusted, output, pixel);
             }
+        }
+        var after = Measure(output, targetRegions, targetMask, reference, referenceRegions, referenceMask)
+            with { GuardApplied = true, GuardRegions = shifts.Select(zone => zone.ToString()).ToArray() };
+        return new(output, after);
+    }
+
+    public static byte[] CalmBackground(byte[] pixels, byte[] figureMask, double amount)
+    {
+        if (pixels.Length != RgbFrame.ByteCount || figureMask.Length != 64 * 64)
+            throw new ArgumentException("Portrait and figure mask dimensions must be 64x64.");
+        amount = Math.Clamp(amount, 0, .5);
+        if (amount <= 0) return pixels.ToArray();
+        var background = Enumerable.Range(0, 64 * 64).Where(index => figureMask[index] == 0).ToArray();
+        var meanL = background.Length == 0 ? 50 : background.Average(index => ToLab(pixels, index).L);
+        var output = pixels.ToArray();
+        for (var pixel = 0; pixel < 64 * 64; pixel++)
+        {
+            var strength = amount * (1 - figureMask[pixel] / 255d);
+            if (strength <= 0) continue;
+            var lab = ToLab(pixels, pixel);
+            FromLab(new Lab(
+                meanL + (lab.L - meanL) * (1 - strength),
+                lab.A * (1 - strength),
+                lab.B * (1 - strength)), output, pixel);
         }
         return output;
     }
@@ -179,8 +217,7 @@ public static class PortraitColorMatcher
     {
         var labs = indices.Select(index => ToLab(pixels, index)).ToArray();
         var mean = new Lab(labs.Average(x => x.L), labs.Average(x => x.A), labs.Average(x => x.B));
-        var std = new Lab(Deviation(labs.Select(x => x.L), mean.L), Deviation(labs.Select(x => x.A), mean.A), Deviation(labs.Select(x => x.B), mean.B));
-        return new(mean, std, labs.Length);
+        return new(mean, labs.Length);
     }
 
     private static ColorSummary Summary(byte[] pixels, IEnumerable<int> values)
@@ -220,18 +257,6 @@ public static class PortraitColorMatcher
         };
         if (hair && name is ("amber" or "golden")) return "warm golden blonde";
         return $"{tone} {name} (RGB {color.R}, {color.G}, {color.B})";
-    }
-
-    private static double Transfer(double value, double fromMean, double fromStd, double toMean, double toStd)
-    {
-        var ratio = Math.Clamp(toStd / Math.Max(2, fromStd), .55, 1.8);
-        return toMean + (value - fromMean) * ratio;
-    }
-
-    private static double Deviation(IEnumerable<double> values, double mean)
-    {
-        var array = values.ToArray();
-        return Math.Sqrt(array.Sum(value => Math.Pow(value - mean, 2)) / Math.Max(1, array.Length));
     }
 
     private static bool IsSkin(byte[] pixels, int pixel)

@@ -39,7 +39,11 @@ public sealed record PortraitPack(
     PortraitProvenance Provenance,
     int PaletteSize,
     double FaceContrast,
-    PortraitColorMatchMetrics ColorMatch);
+    PortraitColorMatchMetrics ColorMatch,
+    PortraitReductionOptions? ReductionOptions = null);
+
+public sealed record PortraitReductionOptions(int? PaletteColors = null, double BackgroundCalmAmount = 0);
+internal sealed record PortraitReductionResult(byte[] Pixels, PortraitColorMatchMetrics ColorMatch);
 
 public sealed record PreparedPortrait(
     byte[] CropPng,
@@ -60,8 +64,8 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const int PaletteLimit = 48;
-    public const string PipelineVersion = "portrait-v2";
+    public const int DefaultOptionalPaletteColors = 40;
+    public const string PipelineVersion = "portrait-v3";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -75,7 +79,7 @@ public sealed class PortraitPackBuilder
         var cropRect = new SKRectI(x, y, x + side, y + side);
         using var crop = Crop(source, cropRect);
         var cropPng = EncodePng(crop);
-        var fallback = Reduce(crop, PaletteLimit, null);
+        var fallback = BoxDownsample(crop, 64, 64);
         var mappedFace = Map(face, cropRect);
         var regions = RegionsFromFace(mappedFace);
         var mask = FigureMaskBuilder.Build(regions);
@@ -84,34 +88,31 @@ public sealed class PortraitPackBuilder
     }
 
     public PortraitPack Build(byte[] redrawBytes, PreparedPortrait prepared, string sourceAssetId,
-        string workflow, long seed, DateTimeOffset generatedAt)
+        string workflow, long seed, DateTimeOffset generatedAt, PortraitReductionOptions? options = null)
     {
+        options ??= new PortraitReductionOptions();
+        ValidateOptions(options);
         using var redraw = SKBitmap.Decode(redrawBytes) ?? throw new InvalidDataException("Redrawn portrait could not be decoded.");
         var pitch = PixelGridDetector.Detect(redraw);
-        var rawPixels = ReduceRaw(redraw, pitch);
+        var rawPixels = BoxDownsample(redraw, 64, 64);
         var redrawFace = Map(FindFaceWindow(redraw), new SKRectI(0, 0, redraw.Width, redraw.Height));
         var regions = RegionsFromFace(redrawFace);
         var mask = FigureMaskBuilder.Build(regions);
-        var matched = PortraitColorMatcher.Match(rawPixels, regions, mask,
+        var inputColorMatch = PortraitColorMatcher.Measure(rawPixels, regions, mask,
             prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        var basePixels = PaletteQuantizer.Quantize(matched, PaletteLimit);
-        // Median-cut operates globally, so its palette merge can move a small
-        // semantic region after the first transfer.  Re-transfer the quantized
-        // pixels once and re-quantize; this keeps the palette bounded while
-        // making the final (not merely pre-quantization) regional means match.
-        matched = PortraitColorMatcher.Match(basePixels, regions, mask,
-            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        basePixels = PaletteQuantizer.Quantize(matched, PaletteLimit);
-        var colorMatch = PortraitColorMatcher.Measure(basePixels, regions, mask,
-            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        var validation = Validate(basePixels, regions);
-        var colorErrors = colorMatch.Errors().ToArray();
+        var reduction = FinalizeReduction(rawPixels, regions, mask, prepared.FallbackPixels,
+            prepared.Regions, prepared.FigureMask, options);
+        var validation = Validate(reduction.Pixels, regions, options.PaletteColors);
+        var colorErrors = reduction.ColorMatch.Errors().ToArray();
         if (colorErrors.Length > 0)
             validation = validation with { Valid = false, Errors = validation.Errors.Concat(colorErrors).ToArray() };
-        if (!validation.Valid) throw new InvalidDataException(string.Join("; ", validation.Errors));
-        return new(basePixels, prepared.FallbackPixels, mask, regions,
+        if (!validation.Valid) throw new InvalidDataException($"{string.Join("; ", validation.Errors)}; " +
+            $"guard input hair hue Δ{inputColorMatch.HairHueDelta:0.0}° L* Δ{inputColorMatch.HairLightnessDelta:0.0}, " +
+            $"inner garment hue Δ{inputColorMatch.GarmentHueDelta:0.0}° L* Δ{inputColorMatch.GarmentLightnessDelta:0.0}, " +
+            $"jacket hue Δ{inputColorMatch.JacketHueDelta:0.0}° L* Δ{inputColorMatch.JacketLightnessDelta:0.0}");
+        return new(reduction.Pixels, prepared.FallbackPixels, mask, regions,
             new(sourceAssetId, prepared.SourceHash, PipelineVersion, workflow, seed, generatedAt, pitch),
-            validation.PaletteSize, validation.FaceContrast, colorMatch);
+            validation.PaletteSize, validation.FaceContrast, reduction.ColorMatch, options);
     }
 
     public PortraitPack BuildFallback(PreparedPortrait prepared, string sourceAssetId, DateTimeOffset generatedAt)
@@ -122,16 +123,38 @@ public sealed class PortraitPackBuilder
             prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
         return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.FigureMask, prepared.Regions,
             new(sourceAssetId, prepared.SourceHash, PipelineVersion, "faithful-b", 0, generatedAt, null),
-            validation.PaletteSize, validation.FaceContrast, metrics);
+            validation.PaletteSize, validation.FaceContrast, metrics, new PortraitReductionOptions());
     }
 
-    public PortraitValidation Validate(byte[] pixels, PortraitRegions regions)
+    internal static PortraitReductionResult FinalizeReduction(byte[] boxPixels, PortraitRegions regions, byte[] mask,
+        byte[] reference, PortraitRegions referenceRegions, byte[] referenceMask, PortraitReductionOptions? options = null)
+    {
+        options ??= new PortraitReductionOptions();
+        ValidateOptions(options);
+        var guarded = PortraitColorMatcher.ApplyGuard(boxPixels, regions, mask, reference, referenceRegions, referenceMask);
+        var pixels = options.BackgroundCalmAmount > 0
+            ? PortraitColorMatcher.CalmBackground(guarded.Pixels, mask, options.BackgroundCalmAmount)
+            : guarded.Pixels;
+        if (options.PaletteColors is { } paletteColors)
+            pixels = PaletteQuantizer.Quantize(pixels, paletteColors);
+        var metrics = PortraitColorMatcher.Measure(pixels, regions, mask, reference, referenceRegions, referenceMask)
+            with { GuardApplied = guarded.Metrics.GuardApplied, GuardRegions = guarded.Metrics.GuardRegions };
+        return new(pixels, metrics);
+    }
+
+    internal static byte[] BoxReduce(byte[] encodedImage)
+    {
+        using var source = SKBitmap.Decode(encodedImage) ?? throw new InvalidDataException("Portrait could not be decoded.");
+        return BoxDownsample(source, 64, 64);
+    }
+
+    public PortraitValidation Validate(byte[] pixels, PortraitRegions regions, int? paletteLimit = null)
     {
         var errors = new List<string>();
         if (pixels.Length != RgbFrame.ByteCount) errors.Add("base frame is not exactly 64x64 RGB");
         if (pixels.Length != RgbFrame.ByteCount) return new(false, errors, 0, 0);
         var palette = PaletteQuantizer.CountColors(pixels);
-        if (palette > PaletteLimit) errors.Add($"palette has {palette} colours (limit {PaletteLimit})");
+        if (paletteLimit is { } limit && palette > limit) errors.Add($"palette has {palette} colours (limit {limit})");
         foreach (var (name, region) in new[] { ("face", regions.Face), ("left eye", regions.LeftEye), ("right eye", regions.RightEye), ("mouth", regions.Mouth) })
             if (region.Width < 2 || region.Height < 2 || region.X < 0 || region.Y < 0 || region.Right > 64 || region.Bottom > 64)
                 errors.Add($"{name} region was not found");
@@ -183,27 +206,12 @@ public sealed class PortraitPackBuilder
         return mask;
     }
 
-    private static byte[] Reduce(SKBitmap source, int colors, int? pitch)
-        => PaletteQuantizer.Quantize(ReduceRaw(source, pitch), colors);
-
-    private static byte[] ReduceRaw(SKBitmap source, int? pitch)
+    private static void ValidateOptions(PortraitReductionOptions options)
     {
-        SKBitmap? alignedCrop = null;
-        var aligned = source;
-        if (pitch is > 1)
-        {
-            var width = source.Width - source.Width % pitch.Value;
-            var height = source.Height - source.Height % pitch.Value;
-            if (width >= 64 && height >= 64)
-            {
-                var x = (source.Width - width) / 2;
-                var y = (source.Height - height) / 2;
-                alignedCrop = Crop(source, new SKRectI(x, y, x + width, y + height));
-                aligned = alignedCrop;
-            }
-        }
-        try { return BoxDownsample(aligned, 64, 64); }
-        finally { alignedCrop?.Dispose(); }
+        if (options.PaletteColors is < 2 or > 256)
+            throw new ArgumentOutOfRangeException(nameof(options), "PaletteColors must be between 2 and 256 when enabled.");
+        if (options.BackgroundCalmAmount is < 0 or > .5)
+            throw new ArgumentOutOfRangeException(nameof(options), "BackgroundCalmAmount must be between 0 and 0.5.");
     }
 
     private static byte[] ToRgb(SKBitmap image)
@@ -318,9 +326,9 @@ public sealed class PortraitPackBuilder
                 r += pixel.Red; g += pixel.Green; b += pixel.Blue; count++;
             }
             var i = (dy * width + dx) * 3;
-            output[i] = (byte)(r / count);
-            output[i + 1] = (byte)(g / count);
-            output[i + 2] = (byte)(b / count);
+            output[i] = (byte)((r + count / 2) / count);
+            output[i + 1] = (byte)((g + count / 2) / count);
+            output[i + 2] = (byte)((b + count / 2) / count);
         }
         return output;
     }

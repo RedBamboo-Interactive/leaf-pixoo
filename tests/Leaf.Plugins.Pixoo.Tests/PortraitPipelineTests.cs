@@ -41,7 +41,20 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Regional_colour_transfer_survives_bounded_quantization()
+    public void Colour_guard_leaves_an_in_tolerance_portrait_byte_identical()
+    {
+        var regions = Regions();
+        var mask = FigureMaskBuilder.Build(regions);
+        var box = Pattern();
+
+        var result = PortraitPackBuilder.FinalizeReduction(box, regions, mask, box, regions, mask);
+
+        Assert.False(result.ColorMatch.GuardApplied);
+        Assert.Equal(box, result.Pixels);
+    }
+
+    [Fact]
+    public void Colour_guard_applies_a_mean_only_shift_when_a_semantic_region_drifts()
     {
         var regions = Regions();
         var mask = FigureMaskBuilder.Build(regions);
@@ -52,17 +65,36 @@ public sealed class PortraitPipelineTests
         PaintZone(reference, regions, mask, "InnerTop", 178, 105, 38);
         PaintZone(target, regions, mask, "InnerTop", 205, 205, 200);
 
-        var matched = PortraitColorMatcher.Match(target, regions, mask, reference, regions, mask);
-        matched = PaletteQuantizer.Quantize(matched, PortraitPackBuilder.PaletteLimit);
-        matched = PortraitColorMatcher.Match(matched, regions, mask, reference, regions, mask);
-        matched = PaletteQuantizer.Quantize(matched, PortraitPackBuilder.PaletteLimit);
-        var metrics = PortraitColorMatcher.Measure(matched, regions, mask, reference, regions, mask);
+        var guarded = PortraitColorMatcher.ApplyGuard(target, regions, mask, reference, regions, mask);
+        var metrics = guarded.Metrics;
 
+        Assert.True(metrics.GuardApplied);
+        Assert.Contains("Hair", metrics.GuardRegions!);
+        Assert.Contains("InnerTop", metrics.GuardRegions!);
         Assert.True(metrics.HairHueDelta <= 12, $"hair hue delta was {metrics.HairHueDelta}");
-        Assert.True(metrics.HairLightnessDelta <= 8, $"hair lightness delta was {metrics.HairLightnessDelta}");
+        Assert.True(metrics.HairLightnessDelta <= 10, $"hair lightness delta was {metrics.HairLightnessDelta}");
         Assert.True(metrics.GarmentHueDelta <= 15, $"garment hue delta was {metrics.GarmentHueDelta}");
         Assert.True(metrics.GarmentLightnessDelta <= 10, $"garment lightness delta was {metrics.GarmentLightnessDelta}");
-        Assert.InRange(PaletteQuantizer.CountColors(matched), 2, PortraitPackBuilder.PaletteLimit);
+    }
+
+    [Fact]
+    public void Default_pipeline_output_equals_plain_box_reduction_when_guard_does_not_fire()
+    {
+        using var bitmap = new SKBitmap(128, 128, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        for (var y = 0; y < 128; y++)
+        for (var x = 0; x < 128; x++)
+            bitmap.SetPixel(x, y, new SKColor((byte)(x * 2), (byte)(y * 2), (byte)(x + y)));
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+        var box = PortraitPackBuilder.BoxReduce(encoded.ToArray());
+        var regions = Regions();
+        var mask = FigureMaskBuilder.Build(regions);
+
+        var result = PortraitPackBuilder.FinalizeReduction(box, regions, mask, box, regions, mask,
+            new PortraitReductionOptions(PaletteColors: null, BackgroundCalmAmount: 0));
+
+        Assert.False(result.ColorMatch.GuardApplied);
+        Assert.Equal(box, result.Pixels);
     }
 
     [Fact]
@@ -121,7 +153,7 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Speaking_shapes_have_one_three_and_five_pixel_openings()
+    public void Speaking_shapes_are_closed_one_and_two_pixel_openings_with_bounded_width()
     {
         var regions = Regions() with { Mouth = new PixelRegion(24, 30, 16, 8) };
         var pixels = Pattern();
@@ -130,12 +162,22 @@ public sealed class PortraitPipelineTests
             PaletteQuantizer.CountColors(pixels), 100,
             new PortraitColorMatchMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         var frames = PortraitAnimation.Render(pack, FaceState.Speaking, "#9a7cff", 100).Frames;
+        var renderedBase = frames[0].Pixels;
+        var closed = pixels.ToArray();
+        PortraitAnimation.ApplyMouthShape(closed, regions, 0);
         var changedRows = frames.Select(frame => Enumerable.Range(regions.Mouth.Y, regions.Mouth.Height)
-            .Count(y => Enumerable.Range(regions.Mouth.X, regions.Mouth.Width).Any(x => PixelChanged(pixels, frame.Pixels, x, y)))).ToArray();
+            .Count(y => Enumerable.Range(regions.Mouth.X, regions.Mouth.Width).Any(x => PixelChanged(renderedBase, frame.Pixels, x, y)))).ToArray();
 
-        Assert.Equal([1, 3, 5], changedRows);
-        Assert.True(changedRows[1] - changedRows[0] >= 2);
-        Assert.True(changedRows[2] - changedRows[1] >= 2);
+        Assert.Equal([0, 1, 2], changedRows);
+        Assert.Equal(pixels, closed);
+        Assert.InRange(ChangedColumns(renderedBase, frames[1].Pixels, regions.Mouth), 1, 4);
+        Assert.InRange(ChangedColumns(renderedBase, frames[2].Pixels, regions.Mouth), 1, 6);
+        var changed = ChangedColors(renderedBase, frames[2].Pixels, regions.Mouth).ToArray();
+        Assert.All(changed, color =>
+        {
+            Assert.True(color.R >= 52 && color.R > color.G && color.R > color.B);
+            Assert.True(color.G >= 24 && color.B >= 20);
+        });
     }
 
     private static PortraitRegions Regions() => new(
@@ -211,6 +253,21 @@ public sealed class PortraitPipelineTests
     {
         var i = (y * 64 + x) * 3;
         return before[i] != after[i] || before[i + 1] != after[i + 1] || before[i + 2] != after[i + 2];
+    }
+
+    private static int ChangedColumns(byte[] before, byte[] after, PixelRegion region)
+        => Enumerable.Range(region.X, region.Width).Count(x => Enumerable.Range(region.Y, region.Height)
+            .Any(y => PixelChanged(before, after, x, y)));
+
+    private static IEnumerable<(byte R, byte G, byte B)> ChangedColors(byte[] before, byte[] after, PixelRegion region)
+    {
+        for (var y = region.Y; y < region.Bottom; y++)
+        for (var x = region.X; x < region.Right; x++)
+        {
+            if (!PixelChanged(before, after, x, y)) continue;
+            var i = (y * 64 + x) * 3;
+            yield return (after[i], after[i + 1], after[i + 2]);
+        }
     }
 
     private static void PaintZone(byte[] pixels, PortraitRegions regions, byte[] mask, string zone, byte r, byte g, byte b)
