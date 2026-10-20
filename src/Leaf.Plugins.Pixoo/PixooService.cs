@@ -25,7 +25,7 @@ public sealed class PixooService(
         var agents = await entities.QueryAsync(new EntityQuery { TypeSlug = "agent", Limit = 100 }, ct);
         return agents.Where(a => caller.AgentId is null || caller.AgentId == a.Id.ToString())
             .Where(a => a.Data["confidential"]?.GetValue<bool>() != true || a.Data["owner_id"]?.GetValue<string>() == caller.UserId)
-            .Select(a => new AgentSummary(a.Id, a.Name, AgentColor(a))).ToArray();
+            .Select(a => new AgentSummary(a.Id, a.Name, AgentColor(a), AgentAvatar(a))).ToArray();
     }
 
     public async Task<IReadOnlyList<PixooDevice>> DevicesAsync(PixooCaller caller, CancellationToken ct)
@@ -189,9 +189,19 @@ public sealed class PixooService(
             value = value.ToLowerInvariant() switch { "teal" => "#43e0c2", "blue" => "#55a7ff", "rose" => "#ff6f91", "amber" => "#ffbd59", _ => "#7c5cff" };
         return value;
     }
+
+    private static string? AgentAvatar(LeafEntity agent)
+    {
+        var value = agent.Data["avatar"] is JsonObject avatar
+            ? avatar["url"]?.GetValue<string>() ?? avatar["filename"]?.GetValue<string>()
+            : agent.Data["avatar"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (value.StartsWith("/", StringComparison.Ordinal) || Uri.TryCreate(value, UriKind.Absolute, out _)) return value;
+        return $"/api/assets/{value}";
+    }
 }
 
-public sealed record AgentSummary(Guid Id, string Name, string Color);
+public sealed record AgentSummary(Guid Id, string Name, string Color, string? AvatarUrl);
 
 public sealed record DeviceChange(
     string Name,

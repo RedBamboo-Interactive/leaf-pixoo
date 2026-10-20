@@ -25,6 +25,7 @@ public sealed record PortraitRegions(
 public sealed record PortraitProvenance(
     string SourceAssetId,
     string SourceHash,
+    string PipelineVersion,
     string Workflow,
     long Seed,
     DateTimeOffset GeneratedAt,
@@ -33,16 +34,20 @@ public sealed record PortraitProvenance(
 public sealed record PortraitPack(
     byte[] BasePixels,
     byte[] FallbackPixels,
+    byte[] FigureMask,
     PortraitRegions Regions,
     PortraitProvenance Provenance,
     int PaletteSize,
-    double FaceContrast);
+    double FaceContrast,
+    PortraitColorMatchMetrics ColorMatch);
 
 public sealed record PreparedPortrait(
     byte[] CropPng,
     byte[] FallbackPixels,
+    byte[] FigureMask,
     PortraitRegions Regions,
-    string SourceHash);
+    string SourceHash,
+    PortraitColorHints ColorHints);
 
 public sealed record PortraitValidation(bool Valid, IReadOnlyList<string> Errors, int PaletteSize, double FaceContrast);
 
@@ -56,6 +61,7 @@ public static class PortraitSourceFingerprint
 public sealed class PortraitPackBuilder
 {
     public const int PaletteLimit = 48;
+    public const string PipelineVersion = "portrait-v2";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -72,7 +78,9 @@ public sealed class PortraitPackBuilder
         var fallback = Reduce(crop, PaletteLimit, null);
         var mappedFace = Map(face, cropRect);
         var regions = RegionsFromFace(mappedFace);
-        return new(cropPng, fallback, regions, PortraitSourceFingerprint.Hash(sourceBytes));
+        var mask = FigureMaskBuilder.Build(regions);
+        var hints = PortraitColorMatcher.Describe(fallback, regions, mask);
+        return new(cropPng, fallback, mask, regions, PortraitSourceFingerprint.Hash(sourceBytes), hints);
     }
 
     public PortraitPack Build(byte[] redrawBytes, PreparedPortrait prepared, string sourceAssetId,
@@ -80,23 +88,41 @@ public sealed class PortraitPackBuilder
     {
         using var redraw = SKBitmap.Decode(redrawBytes) ?? throw new InvalidDataException("Redrawn portrait could not be decoded.");
         var pitch = PixelGridDetector.Detect(redraw);
-        var basePixels = Reduce(redraw, PaletteLimit, pitch);
+        var rawPixels = ReduceRaw(redraw, pitch);
         var redrawFace = Map(FindFaceWindow(redraw), new SKRectI(0, 0, redraw.Width, redraw.Height));
         var regions = RegionsFromFace(redrawFace);
+        var mask = FigureMaskBuilder.Build(regions);
+        var matched = PortraitColorMatcher.Match(rawPixels, regions, mask,
+            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
+        var basePixels = PaletteQuantizer.Quantize(matched, PaletteLimit);
+        // Median-cut operates globally, so its palette merge can move a small
+        // semantic region after the first transfer.  Re-transfer the quantized
+        // pixels once and re-quantize; this keeps the palette bounded while
+        // making the final (not merely pre-quantization) regional means match.
+        matched = PortraitColorMatcher.Match(basePixels, regions, mask,
+            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
+        basePixels = PaletteQuantizer.Quantize(matched, PaletteLimit);
+        var colorMatch = PortraitColorMatcher.Measure(basePixels, regions, mask,
+            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
         var validation = Validate(basePixels, regions);
+        var colorErrors = colorMatch.Errors().ToArray();
+        if (colorErrors.Length > 0)
+            validation = validation with { Valid = false, Errors = validation.Errors.Concat(colorErrors).ToArray() };
         if (!validation.Valid) throw new InvalidDataException(string.Join("; ", validation.Errors));
-        return new(basePixels, prepared.FallbackPixels, regions,
-            new(sourceAssetId, prepared.SourceHash, workflow, seed, generatedAt, pitch),
-            validation.PaletteSize, validation.FaceContrast);
+        return new(basePixels, prepared.FallbackPixels, mask, regions,
+            new(sourceAssetId, prepared.SourceHash, PipelineVersion, workflow, seed, generatedAt, pitch),
+            validation.PaletteSize, validation.FaceContrast, colorMatch);
     }
 
     public PortraitPack BuildFallback(PreparedPortrait prepared, string sourceAssetId, DateTimeOffset generatedAt)
     {
         var validation = Validate(prepared.FallbackPixels, prepared.Regions);
         if (!validation.Valid) throw new InvalidDataException("Faithful portrait fallback failed validation: " + string.Join("; ", validation.Errors));
-        return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.Regions,
-            new(sourceAssetId, prepared.SourceHash, "faithful-b", 0, generatedAt, null),
-            validation.PaletteSize, validation.FaceContrast);
+        var metrics = PortraitColorMatcher.Measure(prepared.FallbackPixels, prepared.Regions, prepared.FigureMask,
+            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
+        return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.FigureMask, prepared.Regions,
+            new(sourceAssetId, prepared.SourceHash, PipelineVersion, "faithful-b", 0, generatedAt, null),
+            validation.PaletteSize, validation.FaceContrast, metrics);
     }
 
     public PortraitValidation Validate(byte[] pixels, PortraitRegions regions)
@@ -112,8 +138,12 @@ public sealed class PortraitPackBuilder
         if (regions.LeftEye.Height < 2 || regions.RightEye.Height < 2) errors.Add("eyes are smaller than two pixels high");
         var faceContrast = Contrast(pixels, regions.Face);
         if (faceContrast < 24) errors.Add($"face contrast is too low ({faceContrast:0.0})");
-        if (Contrast(pixels, regions.LeftEye) < 7 || Contrast(pixels, regions.RightEye) < 7) errors.Add("eye regions have insufficient contrast");
-        if (Contrast(pixels, regions.Mouth) < 7) errors.Add("mouth region has insufficient contrast");
+        var leftEyeContrast = Contrast(pixels, regions.LeftEye);
+        var rightEyeContrast = Contrast(pixels, regions.RightEye);
+        if (leftEyeContrast < 7 || rightEyeContrast < 7)
+            errors.Add($"eye regions have insufficient contrast (left {leftEyeContrast:0.0} at {regions.LeftEye}, right {rightEyeContrast:0.0} at {regions.RightEye}, face {regions.Face})");
+        var mouthContrast = Contrast(pixels, regions.Mouth);
+        if (mouthContrast < 7) errors.Add($"mouth region has insufficient contrast ({mouthContrast:0.0})");
         return new(errors.Count == 0, errors, palette, faceContrast);
     }
 
@@ -137,7 +167,26 @@ public sealed class PortraitPackBuilder
         return ToRgb(image);
     }
 
+    public static byte[] EncodeMaskPng(byte[] mask)
+    {
+        if (mask.Length != 64 * 64) throw new ArgumentException("Figure mask must be exactly 64x64.", nameof(mask));
+        var rgb = new byte[RgbFrame.ByteCount];
+        for (var i = 0; i < mask.Length; i++) rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = mask[i];
+        return EncodePng(rgb);
+    }
+
+    public static byte[] DecodeMaskPng(byte[] png)
+    {
+        var rgb = DecodePng(png);
+        var mask = new byte[64 * 64];
+        for (var i = 0; i < mask.Length; i++) mask[i] = rgb[i * 3];
+        return mask;
+    }
+
     private static byte[] Reduce(SKBitmap source, int colors, int? pitch)
+        => PaletteQuantizer.Quantize(ReduceRaw(source, pitch), colors);
+
+    private static byte[] ReduceRaw(SKBitmap source, int? pitch)
     {
         SKBitmap? alignedCrop = null;
         var aligned = source;
@@ -153,7 +202,7 @@ public sealed class PortraitPackBuilder
                 aligned = alignedCrop;
             }
         }
-        try { return PaletteQuantizer.Quantize(BoxDownsample(aligned, 64, 64), colors); }
+        try { return BoxDownsample(aligned, 64, 64); }
         finally { alignedCrop?.Dispose(); }
     }
 
@@ -189,22 +238,6 @@ public sealed class PortraitPackBuilder
         var skin = new bool[scanSize * scanSize];
         for (var y = 0; y < scanSize; y++)
         for (var x = 0; x < scanSize; x++) skin[y * scanSize + x] = IsSkin(scan.GetPixel(x, y));
-        if (FindEyePair(scan, skin) is { } eyes)
-        {
-            var faceWidth = Math.Clamp((int)Math.Round((eyes.RightX - eyes.LeftX) / .48), 28, 52);
-            var faceHeight = Math.Clamp((int)Math.Round(faceWidth * 1.14), 32, 60);
-            var centerX = (eyes.LeftX + eyes.RightX) / 2d;
-            var eyeY = (eyes.LeftY + eyes.RightY) / 2d;
-            var faceX = Math.Clamp((int)Math.Round(centerX - faceWidth / 2d), 0, scanSize - faceWidth);
-            var faceY = Math.Clamp((int)Math.Round(eyeY - faceHeight * .41), 0, scanSize - faceHeight);
-            var eyeScaleX = source.Width / (double)scanSize;
-            var eyeScaleY = source.Height / (double)scanSize;
-            var eyeResultX = (int)Math.Round(faceX * eyeScaleX);
-            var eyeResultY = (int)Math.Round(faceY * eyeScaleY);
-            var eyeResultWidth = (int)Math.Round(faceWidth * eyeScaleX);
-            var eyeResultHeight = (int)Math.Round(faceHeight * eyeScaleY);
-            return new SKRectI(eyeResultX, eyeResultY, eyeResultX + eyeResultWidth, eyeResultY + eyeResultHeight);
-        }
         var integral = new int[(scanSize + 1) * (scanSize + 1)];
         for (var y = 0; y < scanSize; y++)
         for (var x = 0; x < scanSize; x++)
@@ -212,7 +245,7 @@ public sealed class PortraitPackBuilder
                 + integral[y * (scanSize + 1) + x + 1] + integral[(y + 1) * (scanSize + 1) + x] - integral[y * (scanSize + 1) + x];
 
         var best = (Score: 0d, X: 36, Y: 12, W: 56, H: 62);
-        for (var width = 28; width <= 48; width += 4)
+        for (var width = 32; width <= 56; width += 4)
         {
             var height = (int)Math.Round(width * 1.14);
             for (var y = 4; y + height < 82; y += 3)
@@ -222,7 +255,8 @@ public sealed class PortraitPackBuilder
                 var density = count / (double)(width * height);
                 var centerPenalty = Math.Abs(x + width / 2d - 64) / 128d;
                 var verticalPenalty = y / 420d;
-                var score = density - centerPenalty * .18 - verticalPenalty;
+                var sizePreference = width / (double)scanSize * .35;
+                var score = density + sizePreference - centerPenalty * .18 - verticalPenalty;
                 if (score > best.Score) best = (score, x, y, width, height);
             }
         }
@@ -243,50 +277,6 @@ public sealed class PortraitPackBuilder
         var cr = 128 + .5 * r - .418688 * g - .081312 * b;
         return r > 55 && Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b)) > 10
             && cb is >= 72 and <= 138 && cr is >= 128 and <= 182;
-    }
-
-    private static (int LeftX, int LeftY, int RightX, int RightY)? FindEyePair(SKBitmap scan, bool[] skin)
-    {
-        var candidates = new List<(int X, int Y, double Score)>();
-        for (var y = 10; y < 68; y += 2)
-        for (var x = 6; x < 122; x += 2)
-        {
-            double luminance = 0; var pixels = 0; var ringSkin = 0; var ringPixels = 0;
-            for (var yy = y - 1; yy <= y + 1; yy++)
-            for (var xx = x - 1; xx <= x + 1; xx++)
-            {
-                var p = scan.GetPixel(xx, yy);
-                luminance += .2126 * p.Red + .7152 * p.Green + .0722 * p.Blue;
-                pixels++;
-            }
-            for (var yy = y - 5; yy <= y + 5; yy++)
-            for (var xx = x - 5; xx <= x + 5; xx++)
-            {
-                if (xx < 0 || xx >= 128 || yy < 0 || yy >= 128 || (Math.Abs(xx - x) <= 1 && Math.Abs(yy - y) <= 1)) continue;
-                if (skin[yy * 128 + xx]) ringSkin++;
-                ringPixels++;
-            }
-            var ringDensity = ringSkin / (double)Math.Max(1, ringPixels);
-            var darkness = 1 - luminance / pixels / 255d;
-            var score = ringDensity * 1.25 + darkness * .75;
-            if (ringDensity >= .32 && darkness >= .28) candidates.Add((x, y, score));
-        }
-        var strongest = candidates.OrderByDescending(item => item.Score).Take(80).ToArray();
-        (int LeftX, int LeftY, int RightX, int RightY)? best = null;
-        var bestScore = 0d;
-        foreach (var left in strongest)
-        foreach (var right in strongest)
-        {
-            var separation = right.X - left.X;
-            if (separation is < 10 or > 38 || Math.Abs(left.Y - right.Y) > 5) continue;
-            var midpoint = (left.X + right.X) / 2d;
-            var centerPenalty = Math.Abs(midpoint - 64) / 128d * .08;
-            var verticalPenalty = Math.Max(0, (left.Y + right.Y) / 2d - 56) / 100d;
-            var separationPreference = 1 - Math.Abs(separation - 20) / 50d;
-            var score = left.Score + right.Score + separationPreference * .18 - centerPenalty - verticalPenalty;
-            if (score > bestScore) { bestScore = score; best = (left.X, left.Y, right.X, right.Y); }
-        }
-        return bestScore >= 1.8 ? best : null;
     }
 
     private static int Sum(int[] integral, int stride, int x, int y, int width, int height)
@@ -343,7 +333,7 @@ public sealed class PortraitPackBuilder
         var subjectX = Math.Max(0, face.X - face.Width / 2);
         var subjectWidth = Math.Min(64 - subjectX, face.Width * 2);
         var subject = new PixelRegion(subjectX, Math.Max(0, face.Y - face.Height / 4), subjectWidth, 64 - Math.Max(0, face.Y - face.Height / 4)).Clamp();
-        return new PortraitRegions(face, Rel(.12, .36, .28, .11), Rel(.60, .36, .28, .11), Rel(.33, .69, .36, .13),
+        return new PortraitRegions(face, Rel(.18, .34, .34, .18), Rel(.56, .34, .34, .18), Rel(.28, .65, .44, .22),
             new PixelRegion(subject.X, Math.Min(63, face.Bottom - 2), subject.Width, Math.Max(1, 64 - Math.Min(63, face.Bottom - 2))).Clamp(), subject);
     }
 

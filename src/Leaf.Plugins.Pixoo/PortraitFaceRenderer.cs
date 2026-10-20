@@ -23,7 +23,7 @@ public static class PortraitAnimation
         if (state == FaceState.Dark) return new FrameLoop([new RgbFrame(new byte[RgbFrame.ByteCount], 900)]);
         var accent = ParseColor(color);
         var baseFrame = pack.BasePixels.ToArray();
-        TintBackground(baseFrame, pack.Regions.Subject, accent, .14);
+        TintBackground(baseFrame, pack.FigureMask, accent, .14);
         if (gesture == FaceGesture.Arrive)
         {
             var levels = new[] { 0d, .20, .48, .78, 1d };
@@ -40,19 +40,18 @@ public static class PortraitAnimation
             FaceState.Resting => Enumerable.Range(0, 12).Select(phase =>
             {
                 var pixels = baseFrame.ToArray();
-                BrightenRegion(pixels, pack.Regions.Torso, .97 + .035 * Math.Sin(phase / 12d * Math.PI * 2));
                 if (phase == 9) ApplyBlink(pixels, pack.Regions);
-                return Frame(pixels, brightness, phase == 9 ? 120 : 700);
+                var breathing = .985 + .025 * Math.Sin(phase / 12d * Math.PI * 2);
+                return Frame(pixels, brightness * breathing, phase == 9 ? 120 : 700);
             }).ToArray(),
             FaceState.Listening => new[] { 1.06, 1.10 }.Select(level =>
             {
-                var pixels = baseFrame.ToArray(); BrightenRegion(pixels, pack.Regions.Face, level);
-                return Frame(pixels, brightness, 650);
+                return Frame(baseFrame, brightness * level, 650);
             }).ToArray(),
             FaceState.Thinking => Enumerable.Range(0, 4).Select(phase =>
             {
                 var pixels = baseFrame.ToArray(); ApplyEyeShift(pixels, pack.Regions, phase < 2 ? 1 : 0, -1);
-                TintBackground(pixels, pack.Regions.Subject, accent, .04 + phase * .015);
+                TintBackground(pixels, pack.FigureMask, accent, .04 + phase * .015);
                 return Frame(pixels, brightness, 500);
             }).ToArray(),
             FaceState.Speaking => Enumerable.Range(0, 3).Select(shape =>
@@ -62,13 +61,13 @@ public static class PortraitAnimation
             }).ToArray(),
             FaceState.Working => Enumerable.Range(0, 4).Select(phase =>
             {
-                var pixels = baseFrame.ToArray(); ShimmerBackground(pixels, pack.Regions.Subject, phase);
+                var pixels = baseFrame.ToArray(); ShimmerBackground(pixels, pack.FigureMask, phase);
                 return Frame(pixels, brightness, 320);
             }).ToArray(),
             FaceState.Dreaming => Enumerable.Range(0, 4).Select(phase =>
             {
                 var pixels = baseFrame.ToArray(); ApplyBlink(pixels, pack.Regions);
-                HueDriftBackground(pixels, pack.Regions.Subject, phase);
+                HueDriftBackground(pixels, pack.FigureMask, phase);
                 return Frame(pixels, brightness * .62, 900);
             }).ToArray(),
             FaceState.Asleep => Enumerable.Range(0, 2).Select(_ =>
@@ -90,24 +89,25 @@ public static class PortraitAnimation
     internal static void ApplyMouthShape(byte[] pixels, PortraitRegions regions, int shape)
     {
         var region = regions.Mouth;
-        var dark = Darkest(pixels, region);
+        var dark = Darken(Darkest(pixels, region), .48);
+        var centerX = region.X + region.Width / 2;
         var centerY = region.Y + region.Height / 2;
-        var inset = Math.Max(1, region.Width / 6);
-        var opening = shape switch { 0 => 0, 1 => 1, _ => Math.Max(1, region.Height / 3) };
-        for (var y = centerY - opening; y <= centerY + opening; y++)
-        for (var x = region.X + inset; x < region.Right - inset; x++)
-            Put(pixels, x, y, dark);
-        if (shape == 2 && centerY + opening + 1 < region.Bottom)
+        var height = Math.Min(region.Height, shape switch { 0 => 1, 1 => 3, _ => 5 });
+        var top = Math.Clamp(centerY - height / 2, region.Y, region.Bottom - height);
+        for (var y = top; y < top + height; y++)
         {
-            var light = Lighten(dark, 1.7);
-            for (var x = region.X + inset + 1; x < region.Right - inset - 1; x++) Put(pixels, x, centerY + opening + 1, light);
+            var row = y - top;
+            var edgeInset = height > 1 ? Math.Abs(row - height / 2) : 0;
+            var halfWidth = Math.Max(2, (int)Math.Round(region.Width * (shape == 0 ? .24 : .34))) - edgeInset;
+            for (var x = Math.Max(region.X, centerX - halfWidth); x <= Math.Min(region.Right - 1, centerX + halfWidth); x++)
+            Put(pixels, x, y, dark);
         }
     }
 
     internal static void ApplyEyeShift(byte[] pixels, PortraitRegions regions, int dx, int dy)
     {
-        ShiftRegion(pixels, regions.LeftEye, dx, dy);
-        ShiftRegion(pixels, regions.RightEye, dx, dy);
+        ShiftRegion(pixels, EyeCore(pixels, regions.LeftEye), dx, dy);
+        ShiftRegion(pixels, EyeCore(pixels, regions.RightEye), dx, dy);
     }
 
     private static RgbFrame Frame(byte[] pixels, double brightness, int duration)
@@ -115,11 +115,30 @@ public static class PortraitAnimation
 
     private static void BlinkEye(byte[] pixels, PixelRegion eye, PixelRegion face)
     {
-        var skin = SampleSurrounding(pixels, eye, face);
+        var core = EyeCore(pixels, eye);
+        var skin = SampleSurrounding(pixels, core, face);
         var lid = Darken(skin, .62);
-        Fill(pixels, eye, skin);
-        var y = eye.Y + eye.Height / 2;
-        for (var x = eye.X + 1; x < eye.Right - 1; x++) Put(pixels, x, y, lid);
+        Fill(pixels, core, skin);
+        var y = core.Y + core.Height / 2;
+        for (var x = core.X; x < core.Right; x++) Put(pixels, x, y, lid);
+    }
+
+    private static PixelRegion EyeCore(byte[] pixels, PixelRegion search)
+    {
+        var darkest = (X: search.X + search.Width / 2, Y: search.Y + search.Height / 2, Luminance: double.MaxValue);
+        for (var y = search.Y; y < search.Bottom; y++)
+        for (var x = search.X; x < search.Right; x++)
+        {
+            var i = (y * 64 + x) * 3;
+            var luminance = .2126 * pixels[i] + .7152 * pixels[i + 1] + .0722 * pixels[i + 2];
+            if (luminance < darkest.Luminance) darkest = (x, y, luminance);
+        }
+        var width = Math.Clamp(search.Width / 2, 3, 5);
+        var height = Math.Clamp(search.Height / 2, 2, 3);
+        return new PixelRegion(
+            Math.Clamp(darkest.X - width / 2, search.X, search.Right - width),
+            Math.Clamp(darkest.Y - height / 2, search.Y, search.Bottom - height),
+            width, height);
     }
 
     private static void ShiftRegion(byte[] pixels, PixelRegion region, int dx, int dy)
@@ -135,47 +154,41 @@ public static class PortraitAnimation
         }
     }
 
-    private static void BrightenRegion(byte[] pixels, PixelRegion region, double factor)
+    private static void TintBackground(byte[] pixels, byte[] figureMask, (byte R, byte G, byte B) accent, double amount)
     {
-        for (var y = region.Y; y < region.Bottom; y++)
-        for (var x = region.X; x < region.Right; x++)
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
         {
+            var background = 1 - figureMask[y * 64 + x] / 255d;
+            if (background <= 0) continue;
             var i = (y * 64 + x) * 3;
+            pixels[i] = Mix(pixels[i], accent.R, amount * background); pixels[i + 1] = Mix(pixels[i + 1], accent.G, amount * background); pixels[i + 2] = Mix(pixels[i + 2], accent.B, amount * background);
+        }
+    }
+
+    private static void ShimmerBackground(byte[] pixels, byte[] figureMask, int phase)
+    {
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
+        {
+            var background = 1 - figureMask[y * 64 + x] / 255d;
+            if (background <= 0 || (x + y + phase * 3) % 11 > 1) continue;
+            var i = (y * 64 + x) * 3;
+            var factor = 1 + .06 * background;
             pixels[i] = Clamp(pixels[i] * factor); pixels[i + 1] = Clamp(pixels[i + 1] * factor); pixels[i + 2] = Clamp(pixels[i + 2] * factor);
         }
     }
 
-    private static void TintBackground(byte[] pixels, PixelRegion subject, (byte R, byte G, byte B) accent, double amount)
-    {
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            if (subject.Contains(x, y)) continue;
-            var i = (y * 64 + x) * 3;
-            pixels[i] = Mix(pixels[i], accent.R, amount); pixels[i + 1] = Mix(pixels[i + 1], accent.G, amount); pixels[i + 2] = Mix(pixels[i + 2], accent.B, amount);
-        }
-    }
-
-    private static void ShimmerBackground(byte[] pixels, PixelRegion subject, int phase)
-    {
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            if (subject.Contains(x, y) || (x + y + phase * 3) % 11 > 1) continue;
-            var i = (y * 64 + x) * 3;
-            pixels[i] = Clamp(pixels[i] * 1.06); pixels[i + 1] = Clamp(pixels[i + 1] * 1.06); pixels[i + 2] = Clamp(pixels[i + 2] * 1.06);
-        }
-    }
-
-    private static void HueDriftBackground(byte[] pixels, PixelRegion subject, int phase)
+    private static void HueDriftBackground(byte[] pixels, byte[] figureMask, int phase)
     {
         var drift = phase switch { 0 => (6, 0, 8), 1 => (2, 3, 10), 2 => (-2, 6, 8), _ => (3, 2, 6) };
         for (var y = 0; y < 64; y++)
         for (var x = 0; x < 64; x++)
         {
-            if (subject.Contains(x, y)) continue;
+            var background = 1 - figureMask[y * 64 + x] / 255d;
+            if (background <= 0) continue;
             var i = (y * 64 + x) * 3;
-            pixels[i] = Clamp(pixels[i] + drift.Item1); pixels[i + 1] = Clamp(pixels[i + 1] + drift.Item2); pixels[i + 2] = Clamp(pixels[i + 2] + drift.Item3);
+            pixels[i] = Clamp(pixels[i] + drift.Item1 * background); pixels[i + 1] = Clamp(pixels[i + 1] + drift.Item2 * background); pixels[i + 2] = Clamp(pixels[i + 2] + drift.Item3 * background);
         }
     }
 
@@ -228,8 +241,6 @@ public static class PortraitAnimation
     }
 
     private static (byte R, byte G, byte B) Darken((byte R, byte G, byte B) value, double factor)
-        => (Clamp(value.R * factor), Clamp(value.G * factor), Clamp(value.B * factor));
-    private static (byte R, byte G, byte B) Lighten((byte R, byte G, byte B) value, double factor)
         => (Clamp(value.R * factor), Clamp(value.G * factor), Clamp(value.B * factor));
     private static byte Mix(byte source, byte target, double amount) => Clamp(source * (1 - amount) + target * amount);
     private static byte Clamp(double value) => (byte)Math.Clamp(Math.Round(value), 0, 255);

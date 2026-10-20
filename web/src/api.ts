@@ -5,7 +5,7 @@ const base='/api/extensions/pixoo'
 const client=createExecutionTokenClient('pixoo')
 const harness=location.port==='4173' || new URLSearchParams(location.search).has('harness')
 const ids={device:'11111111-1111-1111-1111-111111111111',agent:'22222222-2222-2222-2222-222222222222'}
-const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff'},{id:'33333333-3333-3333-3333-333333333333',name:'Vesper',color:'#78e6c4'}]
+const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff',avatarUrl:'/source-crop.png'},{id:'33333333-3333-3333-3333-333333333333',name:'Vesper',color:'#78e6c4'}]
 let device:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
 let snapshot:Snapshot={device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}]}
 let preview:Partial<Record<FaceState,Frame[]>>|null=null

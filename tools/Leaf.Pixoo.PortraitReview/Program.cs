@@ -18,11 +18,13 @@ if (args[0] == "prepare")
     var prepared = builder.Prepare(await File.ReadAllBytesAsync(sourcePath));
     await File.WriteAllBytesAsync(Path.Combine(output, "source-crop.png"), prepared.CropPng);
     await File.WriteAllBytesAsync(Path.Combine(output, "faithful-fallback-64.png"), PortraitPackBuilder.EncodePng(prepared.FallbackPixels));
+    await File.WriteAllBytesAsync(Path.Combine(output, "faithful-colour-regions-64.png"), PortraitPackBuilder.EncodePng(
+        PortraitColorMatcher.VisualizeRegions(prepared.FallbackPixels, prepared.Regions, prepared.FigureMask)));
     await File.WriteAllBytesAsync(Path.Combine(output, "faithful-fallback-8x.png"), PortraitReview.ContactSheet(
         new FrameLoop([new RgbFrame(prepared.FallbackPixels, 1000)]), 8));
     var fallback = builder.BuildFallback(prepared, "review-source", DateTimeOffset.UtcNow);
-    var seeds = Enumerable.Range(0, 3).Select(attempt => SeedFor(prepared.SourceHash, attempt)).ToArray();
-    Console.WriteLine(JsonSerializer.Serialize(new { prepared.SourceHash, seeds, prepared.Regions, fallback.PaletteSize, fallback.FaceContrast }));
+    var seeds = Enumerable.Range(3, 3).Select(attempt => SeedFor(prepared.SourceHash, attempt)).ToArray();
+    Console.WriteLine(JsonSerializer.Serialize(new { prepared.SourceHash, seeds, prepared.Regions, prepared.ColorHints, fallback.PaletteSize, fallback.FaceContrast }));
     return 0;
 }
 
@@ -63,11 +65,12 @@ var preview = new JsonObject
     ["paletteSize"] = pack.PaletteSize,
     ["faceContrast"] = pack.FaceContrast,
     ["regions"] = JsonSerializer.SerializeToNode(pack.Regions),
+    ["colorMatch"] = JsonSerializer.SerializeToNode(pack.ColorMatch),
     ["states"] = states,
 };
 await File.WriteAllTextAsync(Path.Combine(outputDir, "portrait-preview.json"),
     preview.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-Console.WriteLine(JsonSerializer.Serialize(new { seed, pack.PaletteSize, pack.FaceContrast, pack.Provenance.DetectedGridPitch }));
+Console.WriteLine(JsonSerializer.Serialize(new { seed, pack.PaletteSize, pack.FaceContrast, pack.Provenance.DetectedGridPitch, pack.ColorMatch }));
 return 0;
 
 static long SeedFor(string hash, int attempt)

@@ -12,6 +12,8 @@ public static class PortraitReview
         {
             new("base-64.png", PortraitPackBuilder.EncodePng(pack.BasePixels)),
             new("fallback-64.png", PortraitPackBuilder.EncodePng(pack.FallbackPixels)),
+            new("figure-mask-64.png", PortraitPackBuilder.EncodeMaskPng(pack.FigureMask)),
+            new("colour-regions-64.png", PortraitPackBuilder.EncodePng(PortraitColorMatcher.VisualizeRegions(pack.BasePixels, pack.Regions, pack.FigureMask))),
             new("source-crop-and-base-8x.png", Comparison(sourceCropPng, pack.BasePixels)),
         };
         foreach (var state in Enum.GetValues<FaceState>())
@@ -20,6 +22,8 @@ public static class PortraitReview
             files.Add(new($"{Slug(state)}-native.png", ContactSheet(loop, 1)));
             files.Add(new($"{Slug(state)}-8x.png", ContactSheet(loop, 8)));
         }
+        files.Add(new("speaking-mouth-crop-16x.png", MouthContactSheet(
+            PortraitAnimation.Render(pack, FaceState.Speaking, accent, 100), pack.Regions.Mouth, 16)));
         foreach (var gesture in Enum.GetValues<FaceGesture>())
         {
             var loop = PortraitAnimation.Render(pack, FaceState.Resting, accent, 100, gesture);
@@ -44,6 +48,34 @@ public static class PortraitReview
                 new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None))
                 ?? throw new InvalidDataException("Review frame resize failed.");
             canvas.DrawBitmap(scaled, index * tile, 0);
+        }
+        canvas.Flush();
+        return Encode(sheet);
+    }
+
+    public static byte[] MouthContactSheet(FrameLoop loop, PixelRegion mouth, int scale)
+    {
+        var padding = 1;
+        var x0 = Math.Max(0, mouth.X - padding); var y0 = Math.Max(0, mouth.Y - padding);
+        var x1 = Math.Min(64, mouth.Right + padding); var y1 = Math.Min(64, mouth.Bottom + padding);
+        var width = x1 - x0; var height = y1 - y0;
+        using var sheet = new SKBitmap(width * scale * loop.Frames.Count, height * scale, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        using var canvas = new SKCanvas(sheet);
+        canvas.Clear(SKColors.Black);
+        for (var frameIndex = 0; frameIndex < loop.Frames.Count; frameIndex++)
+        {
+            using var crop = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque);
+            for (var y = 0; y < height; y++)
+            for (var x = 0; x < width; x++)
+            {
+                var source = ((y0 + y) * 64 + x0 + x) * 3;
+                var pixels = loop.Frames[frameIndex].Pixels;
+                crop.SetPixel(x, y, new SKColor(pixels[source], pixels[source + 1], pixels[source + 2]));
+            }
+            using var enlarged = crop.Resize(new SKSizeI(width * scale, height * scale),
+                new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None))
+                ?? throw new InvalidDataException("Mouth review resize failed.");
+            canvas.DrawBitmap(enlarged, frameIndex * width * scale, 0);
         }
         canvas.Flush();
         return Encode(sheet);

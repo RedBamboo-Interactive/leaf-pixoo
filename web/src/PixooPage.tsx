@@ -156,7 +156,7 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
               <Label>Agent</Label>
               <EntityCard
                 entity={{id:selectedAgent.id,typeSlug:'agent',name:selectedAgent.name}}
-                visual={{icon:'ph-bold ph-user-circle'}}
+                visual={{src:selectedAgent.avatarUrl,fallbackText:selectedAgent.name,shape:'circle'}}
                 subtitle={embedded?'Selected in Nova':'Bound Agent'}
                 variant="outlined"
                 actions={!embedded?<Button variant="outline" size="sm" onClick={()=>setAgentPickerOpen(true)}>Change</Button>:undefined}
@@ -196,7 +196,7 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
             <Table>
               <TableHeader><TableRow><TableHead>Time</TableHead><TableHead>State</TableHead><TableHead>Cause</TableHead></TableRow></TableHeader>
               <TableBody>{view?.history.length?view.history.slice(0,6).map((entry,index)=><TableRow key={`${entry.pushedAt}-${index}`}>
-                <TableCell className="font-mono text-xs text-text-muted">{new Date(entry.pushedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</TableCell>
+                <TableCell className="whitespace-nowrap font-mono text-xs tabular-nums tracking-normal text-text-muted">{new Date(entry.pushedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</TableCell>
                 <TableCell><Badge variant="outline" className="capitalize">{entry.state}</Badge></TableCell>
                 <TableCell className="max-w-36 truncate font-mono text-xs text-text-muted">{entry.cause}</TableCell>
               </TableRow>):<TableRow><TableCell colSpan={3} className="text-center text-text-muted">No pushes yet</TableCell></TableRow>}</TableBody>
@@ -222,7 +222,7 @@ function AgentPicker({open,agents,selectedId,onOpenChange,onSelect}:{
         <div className="space-y-2 pr-2">{agents.map(agent=><EntityCard
           key={agent.id}
           entity={{id:agent.id,typeSlug:'agent',name:agent.name}}
-          visual={{icon:'ph-bold ph-user-circle'}}
+          visual={{src:agent.avatarUrl,fallbackText:agent.name,shape:'circle'}}
           subtitle="Leaf Agent"
           variant="outlined"
           selected={agent.id===selectedId}
