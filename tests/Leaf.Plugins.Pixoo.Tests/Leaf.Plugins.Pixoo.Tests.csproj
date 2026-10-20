@@ -7,4 +7,8 @@
     <ProjectReference Include="../../src/Leaf.Plugins.Pixoo/Leaf.Plugins.Pixoo.csproj" />
     <Reference Include="Leaf.Sdk" Condition="'$(LeafSdkAssembly)' != ''"><HintPath>$(LeafSdkAssembly)</HintPath></Reference>
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../artifacts/portrait/base-64.png" Link="Fixtures/nova-base-64.png" />
+    <EmbeddedResource Include="../../artifacts/portrait/landmark-source-1024.png" Link="Fixtures/nova-landmark-source-1024.png" />
+  </ItemGroup>
 </Project>

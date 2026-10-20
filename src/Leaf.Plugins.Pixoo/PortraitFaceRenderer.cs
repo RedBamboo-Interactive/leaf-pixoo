@@ -40,7 +40,7 @@ public static class PortraitAnimation
             FaceState.Resting => Enumerable.Range(0, 12).Select(phase =>
             {
                 var pixels = baseFrame.ToArray();
-                if (phase == 9) ApplyBlink(pixels, pack.Regions);
+                if (phase == 9) ApplyBlink(pixels, pack.Regions, pack.Landmarks);
                 var breathing = .985 + .025 * Math.Sin(phase / 12d * Math.PI * 2);
                 return Frame(pixels, brightness * breathing, phase == 9 ? 120 : 700);
             }).ToArray(),
@@ -56,7 +56,7 @@ public static class PortraitAnimation
             }).ToArray(),
             FaceState.Speaking => Enumerable.Range(0, 3).Select(shape =>
             {
-                var pixels = baseFrame.ToArray(); ApplyMouthShape(pixels, pack.Regions, shape);
+                var pixels = baseFrame.ToArray(); ApplyMouthShape(pixels, pack.Regions, shape, pack.Landmarks);
                 return Frame(pixels, brightness, 190);
             }).ToArray(),
             FaceState.Working => Enumerable.Range(0, 4).Select(phase =>
@@ -66,13 +66,13 @@ public static class PortraitAnimation
             }).ToArray(),
             FaceState.Dreaming => Enumerable.Range(0, 4).Select(phase =>
             {
-                var pixels = baseFrame.ToArray(); ApplyBlink(pixels, pack.Regions);
+                var pixels = baseFrame.ToArray(); ApplyBlink(pixels, pack.Regions, pack.Landmarks);
                 HueDriftBackground(pixels, pack.FigureMask, phase);
                 return Frame(pixels, brightness * .62, 900);
             }).ToArray(),
             FaceState.Asleep => Enumerable.Range(0, 2).Select(_ =>
             {
-                var pixels = baseFrame.ToArray(); ApplyBlink(pixels, pack.Regions);
+                var pixels = baseFrame.ToArray(); ApplyBlink(pixels, pack.Regions, pack.Landmarks);
                 return Frame(pixels, brightness * .24, 1200);
             }).ToArray(),
             _ => [Frame(baseFrame, brightness, 600)],
@@ -80,52 +80,35 @@ public static class PortraitAnimation
         return new FrameLoop(frames).Validate();
     }
 
-    internal static void ApplyBlink(byte[] pixels, PortraitRegions regions)
+    internal static void ApplyBlink(byte[] pixels, PortraitRegions regions, PortraitLandmarks? landmarks = null)
     {
         BlinkEye(pixels, regions.LeftEye, regions.Face);
         BlinkEye(pixels, regions.RightEye, regions.Face);
     }
 
-    internal static void ApplyMouthShape(byte[] pixels, PortraitRegions regions, int shape)
+    internal static void ApplyMouthShape(byte[] pixels, PortraitRegions regions, int shape,
+        PortraitLandmarks? landmarks = null)
     {
         // The closed speaking frame is the accepted portrait byte-for-byte.
         if (shape <= 0) return;
         var region = regions.Mouth;
-        var core = MouthCore(pixels, region);
-        var (interior, lip) = MouthColors(pixels, core);
-        var centerX = core.X + core.Width / 2;
-        var centerY = core.Y + core.Height / 2;
+        var (interior, lip) = MouthColors(pixels, region);
+        var lipLine = landmarks?.LipLine is { Length: > 0 } detected
+            ? detected : [new PixelPoint(region.X + region.Width / 2, region.Y + region.Height / 2)];
+        var centerX = (int)Math.Round(lipLine.Average(point => point.X));
         var height = Math.Min(region.Height, shape == 1 ? 1 : 2);
         var width = Math.Min(region.Width, shape == 1 ? 4 : 6);
-        var top = Math.Clamp(centerY, region.Y, region.Bottom - height);
-        for (var y = top; y < top + height; y++)
+        var left = Math.Clamp(centerX - width / 2, region.X, region.Right - width);
+        for (var x = left; x < left + width; x++)
         {
-            var row = y - top;
-            var rowWidth = height == 2 && row == 1 ? Math.Max(4, width - 2) : width;
-            var left = Math.Clamp(centerX - rowWidth / 2, region.X, region.Right - rowWidth);
-            for (var x = left; x < left + rowWidth; x++)
-                Put(pixels, x, y, x == left || x == left + rowWidth - 1 ? lip : interior);
+            var line = lipLine.MinBy(point => Math.Abs(point.X - x));
+            var centerY = Math.Clamp(line.Y, region.Y, region.Bottom - height);
+            for (var row = 0; row < height; row++)
+            {
+                if (height == 2 && row == 1 && (x == left || x == left + width - 1)) continue;
+                Put(pixels, x, centerY + row, x == left || x == left + width - 1 ? lip : interior);
+            }
         }
-    }
-
-    private static PixelRegion MouthCore(byte[] pixels, PixelRegion search)
-    {
-        var candidates = new List<(int X, int Y, double Score)>();
-        for (var y = search.Y; y < search.Bottom; y++)
-        for (var x = search.X; x < search.Right; x++)
-        {
-            var i = (y * 64 + x) * 3;
-            var r = pixels[i]; var g = pixels[i + 1]; var b = pixels[i + 2];
-            var luminance = .2126 * r + .7152 * g + .0722 * b;
-            var warmth = r - (g + b) / 2d;
-            if (r >= g && r >= b && warmth > 4)
-                candidates.Add((x, y, luminance - warmth * .7));
-        }
-        var selected = candidates.OrderBy(item => item.Score).Take(Math.Max(1, Math.Min(12, candidates.Count / 3))).ToArray();
-        var centerX = selected.Length == 0 ? search.X + search.Width / 2 : (int)Math.Round(selected.Average(item => item.X));
-        var centerY = selected.Length == 0 ? search.Y + search.Height / 2 : (int)Math.Round(selected.Average(item => item.Y));
-        return new PixelRegion(Math.Clamp(centerX - 3, search.X, Math.Max(search.X, search.Right - 6)),
-            Math.Clamp(centerY - 1, search.Y, Math.Max(search.Y, search.Bottom - 2)), Math.Min(6, search.Width), Math.Min(2, search.Height));
     }
 
     private static ((byte R, byte G, byte B) Interior, (byte R, byte G, byte B) Lip) MouthColors(byte[] pixels, PixelRegion region)

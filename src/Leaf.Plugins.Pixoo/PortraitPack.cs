@@ -29,7 +29,9 @@ public sealed record PortraitProvenance(
     string Workflow,
     long Seed,
     DateTimeOffset GeneratedAt,
-    int? DetectedGridPitch);
+    int? DetectedGridPitch,
+    string? LandmarkDetector = null,
+    string? LandmarkJobId = null);
 
 public sealed record PortraitPack(
     byte[] BasePixels,
@@ -40,7 +42,8 @@ public sealed record PortraitPack(
     int PaletteSize,
     double FaceContrast,
     PortraitColorMatchMetrics ColorMatch,
-    PortraitReductionOptions? ReductionOptions = null);
+    PortraitReductionOptions? ReductionOptions = null,
+    PortraitLandmarks? Landmarks = null);
 
 public sealed record PortraitReductionOptions(int? PaletteColors = null, double BackgroundCalmAmount = 0);
 internal sealed record PortraitReductionResult(byte[] Pixels, PortraitColorMatchMetrics ColorMatch);
@@ -65,7 +68,7 @@ public static class PortraitSourceFingerprint
 public sealed class PortraitPackBuilder
 {
     public const int DefaultOptionalPaletteColors = 40;
-    public const string PipelineVersion = "portrait-v3";
+    public const string PipelineVersion = "portrait-v4";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -87,8 +90,9 @@ public sealed class PortraitPackBuilder
         return new(cropPng, fallback, mask, regions, PortraitSourceFingerprint.Hash(sourceBytes), hints);
     }
 
-    public PortraitPack Build(byte[] redrawBytes, PreparedPortrait prepared, string sourceAssetId,
-        string workflow, long seed, DateTimeOffset generatedAt, PortraitReductionOptions? options = null)
+    public PortraitPack Build(byte[] redrawBytes, PreparedPortrait prepared, PortraitLandmarks landmarks,
+        string sourceAssetId, string workflow, long seed, DateTimeOffset generatedAt,
+        PortraitReductionOptions? options = null, string? landmarkJobId = null)
     {
         options ??= new PortraitReductionOptions();
         ValidateOptions(options);
@@ -96,13 +100,14 @@ public sealed class PortraitPackBuilder
         var pitch = PixelGridDetector.Detect(redraw);
         var rawPixels = BoxDownsample(redraw, 64, 64);
         var redrawFace = Map(FindFaceWindow(redraw), new SKRectI(0, 0, redraw.Width, redraw.Height));
-        var regions = RegionsFromFace(redrawFace);
+        var scaffold = RegionsFromFace(redrawFace);
+        var regions = landmarks.ApplyTo(scaffold);
         var mask = FigureMaskBuilder.Build(regions);
         var inputColorMatch = PortraitColorMatcher.Measure(rawPixels, regions, mask,
             prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
         var reduction = FinalizeReduction(rawPixels, regions, mask, prepared.FallbackPixels,
             prepared.Regions, prepared.FigureMask, options);
-        var validation = Validate(reduction.Pixels, regions, options.PaletteColors);
+        var validation = Validate(reduction.Pixels, regions, options.PaletteColors, landmarks);
         var colorErrors = reduction.ColorMatch.Errors().ToArray();
         if (colorErrors.Length > 0)
             validation = validation with { Valid = false, Errors = validation.Errors.Concat(colorErrors).ToArray() };
@@ -111,19 +116,23 @@ public sealed class PortraitPackBuilder
             $"inner garment hue Δ{inputColorMatch.GarmentHueDelta:0.0}° L* Δ{inputColorMatch.GarmentLightnessDelta:0.0}, " +
             $"jacket hue Δ{inputColorMatch.JacketHueDelta:0.0}° L* Δ{inputColorMatch.JacketLightnessDelta:0.0}");
         return new(reduction.Pixels, prepared.FallbackPixels, mask, regions,
-            new(sourceAssetId, prepared.SourceHash, PipelineVersion, workflow, seed, generatedAt, pitch),
-            validation.PaletteSize, validation.FaceContrast, reduction.ColorMatch, options);
+            new(sourceAssetId, prepared.SourceHash, PipelineVersion, workflow, seed, generatedAt, pitch,
+                landmarks.Detector, landmarkJobId),
+            validation.PaletteSize, validation.FaceContrast, reduction.ColorMatch, options, landmarks);
     }
 
-    public PortraitPack BuildFallback(PreparedPortrait prepared, string sourceAssetId, DateTimeOffset generatedAt)
+    public PortraitPack BuildFallback(PreparedPortrait prepared, PortraitLandmarks landmarks,
+        string sourceAssetId, DateTimeOffset generatedAt, string? landmarkJobId = null)
     {
-        var validation = Validate(prepared.FallbackPixels, prepared.Regions);
+        var regions = landmarks.ApplyTo(prepared.Regions);
+        var validation = Validate(prepared.FallbackPixels, regions, landmarks: landmarks);
         if (!validation.Valid) throw new InvalidDataException("Faithful portrait fallback failed validation: " + string.Join("; ", validation.Errors));
-        var metrics = PortraitColorMatcher.Measure(prepared.FallbackPixels, prepared.Regions, prepared.FigureMask,
+        var metrics = PortraitColorMatcher.Measure(prepared.FallbackPixels, regions, prepared.FigureMask,
             prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.FigureMask, prepared.Regions,
-            new(sourceAssetId, prepared.SourceHash, PipelineVersion, "faithful-b", 0, generatedAt, null),
-            validation.PaletteSize, validation.FaceContrast, metrics, new PortraitReductionOptions());
+        return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.FigureMask, regions,
+            new(sourceAssetId, prepared.SourceHash, PipelineVersion, "faithful-b", 0, generatedAt, null,
+                landmarks.Detector, landmarkJobId), validation.PaletteSize, validation.FaceContrast, metrics,
+            new PortraitReductionOptions(), landmarks);
     }
 
     internal static PortraitReductionResult FinalizeReduction(byte[] boxPixels, PortraitRegions regions, byte[] mask,
@@ -148,7 +157,8 @@ public sealed class PortraitPackBuilder
         return BoxDownsample(source, 64, 64);
     }
 
-    public PortraitValidation Validate(byte[] pixels, PortraitRegions regions, int? paletteLimit = null)
+    public PortraitValidation Validate(byte[] pixels, PortraitRegions regions, int? paletteLimit = null,
+        PortraitLandmarks? landmarks = null, bool requireLandmarks = true)
     {
         var errors = new List<string>();
         if (pixels.Length != RgbFrame.ByteCount) errors.Add("base frame is not exactly 64x64 RGB");
@@ -159,6 +169,18 @@ public sealed class PortraitPackBuilder
             if (region.Width < 2 || region.Height < 2 || region.X < 0 || region.Y < 0 || region.Right > 64 || region.Bottom > 64)
                 errors.Add($"{name} region was not found");
         if (regions.LeftEye.Height < 2 || regions.RightEye.Height < 2) errors.Add("eyes are smaller than two pixels high");
+        if (landmarks is null && requireLandmarks) errors.Add("validated face landmarks are required");
+        if (landmarks is not null)
+        {
+            if (landmarks.LeftEyeOutline.Any(point => !regions.Face.Contains(point.X, point.Y))
+                || landmarks.RightEyeOutline.Any(point => !regions.Face.Contains(point.X, point.Y)))
+                errors.Add("eye landmarks are not inside the face box");
+            var leftEyeRow = landmarks.LeftEyeOutline.Average(point => point.Y);
+            var rightEyeRow = landmarks.RightEyeOutline.Average(point => point.Y);
+            var mouthRow = landmarks.LipLine.Average(point => point.Y);
+            if (mouthRow <= Math.Max(leftEyeRow, rightEyeRow))
+                errors.Add("mouth landmark is not below both eyes");
+        }
         var faceContrast = Contrast(pixels, regions.Face);
         if (faceContrast < 24) errors.Add($"face contrast is too low ({faceContrast:0.0})");
         var leftEyeContrast = Contrast(pixels, regions.LeftEye);

@@ -27,12 +27,14 @@ public sealed class PortraitPackService(
 {
     public const string PackEntityType = "pixoo-portrait-pack";
     public const string Workflow = "qwen-image-21-reference-e1003bc3";
+    public const string LandmarkWorkflow = "comfyui_controlnet_aux/MediaPipe-FaceMeshPreprocessor";
     private const string GenerateUrl = "http://127.0.0.1:18804/api/apps/provider-comfyui/workflows/qwen-image-21-reference-e1003bc3/generate";
     private readonly PortraitPackBuilder builder = new();
     private readonly ConcurrentDictionary<Guid, PortraitPack> current = new();
     private readonly ConcurrentDictionary<Guid, Task<PortraitPack?>> builds = new();
     private readonly ConcurrentDictionary<Guid, PortraitPackStatus> statuses = new();
     private readonly ConcurrentDictionary<Guid, DateTimeOffset> failedAt = new();
+    private sealed record LandmarkResult(PortraitLandmarks Landmarks, string JobId, byte[] EvidencePng);
     public event Func<Guid, Task>? PackReady;
 
     public PortraitPack? Current(Guid agentId) => current.GetValueOrDefault(agentId);
@@ -93,10 +95,11 @@ public sealed class PortraitPackService(
 
             statuses[agentId] = new(agentId, "preparing", source.AssetId, source.Hash, null, null, DateTimeOffset.UtcNow);
             var prepared = builder.Prepare(source.Bytes);
-            var faithful = builder.BuildFallback(prepared, source.AssetId, DateTimeOffset.UtcNow);
             await using var cropStream = new MemoryStream(prepared.CropPng, writable: false);
             var cropAsset = await assets.UploadIdempotentAsync(cropStream, $"pixoo:{PortraitPackBuilder.PipelineVersion}:crop:{source.Hash}", $"pixoo-{agentId:N}-crop.png", "image/png", ct);
             PortraitPack? selected = null;
+            PortraitPack? faithful = null;
+            byte[]? landmarkEvidence = null;
             Exception? lastFailure = null;
             for (var attempt = 0; attempt < 3; attempt++)
             {
@@ -105,7 +108,17 @@ public sealed class PortraitPackService(
                 try
                 {
                     var redraw = await GenerateAsync(agentId, source, prepared, cropAsset.Url, seed, ct);
-                    selected = builder.Build(redraw, prepared, source.AssetId, Workflow, seed, DateTimeOffset.UtcNow);
+                    await using var redrawStream = new MemoryStream(redraw, writable: false);
+                    var redrawAsset = await assets.UploadIdempotentAsync(redrawStream,
+                        $"pixoo:{PortraitPackBuilder.PipelineVersion}:redraw:{source.Hash}:{seed}",
+                        $"pixoo-{agentId:N}-redraw-{seed}.png", "image/png", ct);
+                    statuses[agentId] = new(agentId, "landmarks", source.AssetId, source.Hash, seed, null, DateTimeOffset.UtcNow);
+                    var detected = await DetectLandmarksAsync(agentId, source, redrawAsset.Url, seed, ct);
+                    landmarkEvidence = detected.EvidencePng;
+                    faithful ??= builder.BuildFallback(prepared, detected.Landmarks, source.AssetId,
+                        DateTimeOffset.UtcNow, detected.JobId);
+                    selected = builder.Build(redraw, prepared, detected.Landmarks, source.AssetId, Workflow,
+                        seed, DateTimeOffset.UtcNow, landmarkJobId: detected.JobId);
                     break;
                 }
                 catch (TerminalPortraitJobException ex)
@@ -125,14 +138,20 @@ public sealed class PortraitPackService(
             if (selected is null)
             {
                 failedAt[agentId] = DateTimeOffset.UtcNow;
-                await StoreAsync(source, cropAsset, prepared.CropPng, faithful, ct);
+                if (faithful is null)
+                {
+                    statuses[agentId] = new(agentId, "failed-landmarks", source.AssetId, source.Hash, null,
+                        lastFailure?.Message ?? "No candidate produced valid face landmarks.", DateTimeOffset.UtcNow);
+                    return current.GetValueOrDefault(agentId);
+                }
+                await StoreAsync(source, cropAsset, prepared.CropPng, faithful, landmarkEvidence, ct);
                 await ActivateAsync(agentId, faithful);
                 statuses[agentId] = new(agentId, "ready-fallback", source.AssetId, source.Hash, 0,
                     lastFailure?.Message ?? "No semantic redraw passed validation.", DateTimeOffset.UtcNow);
                 return faithful;
             }
             statuses[agentId] = new(agentId, "storing", source.AssetId, source.Hash, selected.Provenance.Seed, null, DateTimeOffset.UtcNow);
-            await StoreAsync(source, cropAsset, prepared.CropPng, selected, ct);
+            await StoreAsync(source, cropAsset, prepared.CropPng, selected, landmarkEvidence, ct);
             await ActivateAsync(agentId, selected);
             failedAt.TryRemove(agentId, out _);
             return selected;
@@ -212,7 +231,90 @@ public sealed class PortraitPackService(
         return await downloaded.Content.ReadAsByteArrayAsync(bounded);
     }
 
-    private async Task StoreAsync(SourcePortrait source, AssetRef cropAsset, byte[] cropPng, PortraitPack pack, CancellationToken ct)
+    private async Task<LandmarkResult> DetectLandmarksAsync(Guid agentId, SourcePortrait source,
+        string redrawUrl, long seed, CancellationToken ct)
+    {
+        var token = executionTokens.IssueSystem(new PluginSystemExecutionTokenRequest(
+            "plugin", PixooPlugin.Id, "Leaf Pixoo", "Locate face features on the retained portrait redraw",
+            [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], TimeSpan.FromMinutes(5)));
+        var graph = new JsonObject
+        {
+            ["1"] = new JsonObject { ["inputs"] = new JsonObject { ["image"] = "placeholder.png" }, ["class_type"] = "LoadImage" },
+            ["2"] = new JsonObject
+            {
+                ["inputs"] = new JsonObject
+                {
+                    ["image"] = new JsonArray("1", 0), ["max_faces"] = 1,
+                    ["min_confidence"] = .2, ["resolution"] = 1024,
+                },
+                ["class_type"] = "MediaPipe-FaceMeshPreprocessor",
+            },
+            ["3"] = new JsonObject
+            {
+                ["inputs"] = new JsonObject
+                {
+                    ["images"] = new JsonArray("2", 0),
+                    ["filename_prefix"] = $"pixoo_landmarks_{source.Hash[..12]}_{seed}",
+                },
+                ["class_type"] = "SaveImage",
+            },
+        };
+        var body = new JsonObject
+        {
+            ["workflow_entity"] = new JsonObject
+            {
+                ["id"] = "pixoo-face-mesh-v1", ["slug"] = "pixoo-face-mesh",
+                ["name"] = "Pixoo face mesh", ["version"] = 1,
+            },
+            ["workflow_inputs"] = new JsonObject { ["reference_image"] = redrawUrl },
+            ["workflow_input_sources"] = new JsonObject { ["reference_image"] = "explicit" },
+            ["workflow_json"] = graph.ToJsonString(),
+            ["workflow_parameters"] = new JsonArray(new JsonObject
+            {
+                ["name"] = "reference_image", ["node_id"] = "1", ["field"] = "image", ["type"] = "image",
+            }),
+            ["output_node"] = "3", ["media_type"] = "image",
+            ["reference_image"] = $"http://127.0.0.1:18804{redrawUrl}",
+            ["name"] = "Pixoo face landmark localization",
+            ["rationale"] = "Locate eye and lip landmarks without generating imagery",
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:18800/image-gen/generate?async=true")
+        {
+            Content = JsonContent.Create(body),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+        request.Headers.TryAddWithoutValidation("X-Async", "true");
+        request.Headers.TryAddWithoutValidation("X-Idempotency-Key", $"pixoo-landmarks:{source.Hash}:{seed}:{PortraitPackBuilder.PipelineVersion}");
+        using var admitted = await http.SendAsync(request, ct);
+        var admission = JsonNode.Parse(await admitted.Content.ReadAsStringAsync(ct)) as JsonObject;
+        if (!admitted.IsSuccessStatusCode || !Guid.TryParse(admission?["jobId"]?.GetValue<string>(), out var jobId))
+            throw new InvalidOperationException($"Landmark job admission failed ({(int)admitted.StatusCode}).");
+
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromMinutes(3));
+        JsonObject? job;
+        do
+        {
+            using var poll = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:18800/jobs/{jobId}?waitSeconds=20");
+            poll.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+            using var polled = await http.SendAsync(poll, deadline.Token);
+            polled.EnsureSuccessStatusCode();
+            job = JsonNode.Parse(await polled.Content.ReadAsStringAsync(deadline.Token)) as JsonObject;
+        } while (job?["terminal"]?.GetValue<bool>() != true);
+        if (!string.Equals(job?["status"]?.GetValue<string>(), "Completed", StringComparison.OrdinalIgnoreCase))
+            throw new TerminalPortraitJobException($"Landmark job {jobId} did not complete successfully.");
+        var outputPath = job?["outputs"]?[0]?["url"]?.GetValue<string>()
+            ?? $"/image-gen/jobs/{jobId}/output";
+        using var output = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:18800{outputPath}");
+        output.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+        using var response = await http.SendAsync(output, deadline.Token);
+        response.EnsureSuccessStatusCode();
+        var evidence = await response.Content.ReadAsByteArrayAsync(deadline.Token);
+        return new(FaceMeshLandmarkDetector.Detect(evidence), jobId.ToString(), evidence);
+    }
+
+    private async Task StoreAsync(SourcePortrait source, AssetRef cropAsset, byte[] cropPng, PortraitPack pack,
+        byte[]? landmarkEvidencePng, CancellationToken ct)
     {
         var stem = $"pixoo:{pack.Provenance.PipelineVersion}:{pack.Provenance.SourceHash}:{pack.Provenance.Seed}";
         var basePng = PortraitPackBuilder.EncodePng(pack.BasePixels);
@@ -224,6 +326,14 @@ public sealed class PortraitPackService(
         var baseAsset = await assets.UploadIdempotentAsync(baseStream, $"{stem}:base", "pixoo-portrait-base.png", "image/png", ct);
         var fallbackAsset = await assets.UploadIdempotentAsync(fallbackStream, $"pixoo:{pack.Provenance.PipelineVersion}:{pack.Provenance.SourceHash}:fallback", "pixoo-portrait-fallback.png", "image/png", ct);
         var maskAsset = await assets.UploadIdempotentAsync(maskStream, $"{stem}:mask", "pixoo-portrait-figure-mask.png", "image/png", ct);
+        string? landmarkAssetId = null;
+        if (landmarkEvidencePng is not null)
+        {
+            await using var landmarkStream = new MemoryStream(landmarkEvidencePng, writable: false);
+            var landmarkAsset = await assets.UploadIdempotentAsync(landmarkStream, $"{stem}:landmarks",
+                "pixoo-portrait-face-mesh.png", "image/png", ct);
+            landmarkAssetId = landmarkAsset.AssetId;
+        }
         var reviewAssets = new JsonArray();
         foreach (var review in PortraitReview.Create(pack, cropPng, source.Color))
         {
@@ -234,7 +344,7 @@ public sealed class PortraitPackService(
         }
         var manifest = new JsonObject
         {
-            ["schema"] = "leaf.pixoo.portrait-pack/v3",
+            ["schema"] = "leaf.pixoo.portrait-pack/v4",
             ["pipelineVersion"] = pack.Provenance.PipelineVersion,
             ["sourceAssetId"] = source.AssetId,
             ["sourceHash"] = source.Hash,
@@ -242,6 +352,9 @@ public sealed class PortraitPackService(
             ["seed"] = pack.Provenance.Seed,
             ["generatedAt"] = pack.Provenance.GeneratedAt,
             ["detectedGridPitch"] = pack.Provenance.DetectedGridPitch,
+            ["landmarkDetector"] = pack.Provenance.LandmarkDetector,
+            ["landmarkJobId"] = pack.Provenance.LandmarkJobId,
+            ["landmarkAsset"] = landmarkAssetId,
             ["cropAsset"] = cropAsset.AssetId,
             ["baseAsset"] = baseAsset.AssetId,
             ["fallbackAsset"] = fallbackAsset.AssetId,
@@ -252,6 +365,7 @@ public sealed class PortraitPackService(
             ["faceContrast"] = pack.FaceContrast,
             ["colorMatch"] = ColorMatchJson(pack.ColorMatch),
             ["regions"] = RegionsJson(pack.Regions),
+            ["landmarks"] = JsonSerializer.SerializeToNode(pack.Landmarks),
             ["reviewAssets"] = reviewAssets,
         };
         var manifestBytes = Encoding.UTF8.GetBytes(manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
@@ -271,6 +385,9 @@ public sealed class PortraitPackService(
             ["base_asset"] = baseAsset.AssetId,
             ["fallback_asset"] = fallbackAsset.AssetId,
             ["figure_mask_asset"] = maskAsset.AssetId,
+            ["landmark_asset"] = landmarkAssetId,
+            ["landmark_detector"] = pack.Provenance.LandmarkDetector,
+            ["landmark_job_id"] = pack.Provenance.LandmarkJobId,
             ["manifest_asset"] = manifestAsset.AssetId,
             ["palette_size"] = pack.PaletteSize,
             ["palette_limit"] = JsonValue.Create(pack.ReductionOptions?.PaletteColors),
@@ -278,6 +395,7 @@ public sealed class PortraitPackService(
             ["face_contrast"] = pack.FaceContrast,
             ["color_match"] = ColorMatchJson(pack.ColorMatch),
             ["regions"] = RegionsJson(pack.Regions),
+            ["landmarks"] = JsonSerializer.SerializeToNode(pack.Landmarks),
         };
         await entities.CreateAsync(PackEntityType, $"{source.AgentName} portrait {source.Hash[..8]}", data, ct);
     }
@@ -296,23 +414,28 @@ public sealed class PortraitPackService(
             var baseId = Text(entity.Data, "base_asset"); var fallbackId = Text(entity.Data, "fallback_asset"); var maskId = Text(entity.Data, "figure_mask_asset");
             if (baseId is null || fallbackId is null || maskId is null) continue;
             var baseFile = await assets.ReadAsync(baseId, ct); var fallbackFile = await assets.ReadAsync(fallbackId, ct); var maskFile = await assets.ReadAsync(maskId, ct);
-            if (baseFile is null || fallbackFile is null || maskFile is null || entity.Data["regions"] is not JsonObject regionData) continue;
+            if (baseFile is null || fallbackFile is null || maskFile is null
+                || entity.Data["regions"] is not JsonObject regionData || entity.Data["landmarks"] is not JsonObject landmarkData) continue;
             try
             {
                 var regions = Regions(regionData);
+                var landmarks = JsonSerializer.Deserialize<PortraitLandmarks>(landmarkData.ToJsonString())
+                    ?? throw new InvalidDataException("Stored portrait landmarks are malformed.");
                 var basePixels = PortraitPackBuilder.DecodePng(baseFile.Bytes);
                 var fallbackPixels = PortraitPackBuilder.DecodePng(fallbackFile.Bytes);
                 var mask = PortraitPackBuilder.DecodeMaskPng(maskFile.Bytes);
                 var provenance = new PortraitProvenance(Text(entity.Data, "source_asset_id") ?? "", hash, PortraitPackBuilder.PipelineVersion,
                     Text(entity.Data, "workflow") ?? Workflow, entity.Data["seed"]?.GetValue<long>() ?? 0,
-                    entity.Data["generated_at"]?.GetValue<DateTimeOffset>() ?? entity.CreatedAt, null);
+                    entity.Data["generated_at"]?.GetValue<DateTimeOffset>() ?? entity.CreatedAt, null,
+                    Text(entity.Data, "landmark_detector"), Text(entity.Data, "landmark_job_id"));
                 var paletteLimit = NullableInteger(entity.Data, "palette_limit");
                 var reductionOptions = new PortraitReductionOptions(paletteLimit, Number(entity.Data, "background_calm_amount"));
-                var validation = builder.Validate(basePixels, regions, paletteLimit);
+                var validation = builder.Validate(basePixels, regions, paletteLimit, landmarks);
                 var metrics = entity.Data["color_match"] is JsonObject storedMetrics
                     ? ColorMatch(storedMetrics)
                     : PortraitColorMatcher.Measure(basePixels, regions, mask, fallbackPixels, regions, mask);
-                if (validation.Valid) return new(basePixels, fallbackPixels, mask, regions, provenance, validation.PaletteSize, validation.FaceContrast, metrics, reductionOptions);
+                if (validation.Valid) return new(basePixels, fallbackPixels, mask, regions, provenance,
+                    validation.PaletteSize, validation.FaceContrast, metrics, reductionOptions, landmarks);
             }
             catch { /* Ignore malformed historical candidates. */ }
         }

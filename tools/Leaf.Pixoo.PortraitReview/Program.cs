@@ -22,24 +22,25 @@ if (args[0] == "prepare")
         PortraitColorMatcher.VisualizeRegions(prepared.FallbackPixels, prepared.Regions, prepared.FigureMask)));
     await File.WriteAllBytesAsync(Path.Combine(output, "faithful-fallback-8x.png"), PortraitReview.ContactSheet(
         new FrameLoop([new RgbFrame(prepared.FallbackPixels, 1000)]), 8));
-    var fallback = builder.BuildFallback(prepared, "review-source", DateTimeOffset.UtcNow);
+    var fallback = builder.Validate(prepared.FallbackPixels, prepared.Regions, requireLandmarks: false);
     var seeds = Enumerable.Range(3, 3).Select(attempt => SeedFor(prepared.SourceHash, attempt)).ToArray();
     Console.WriteLine(JsonSerializer.Serialize(new { prepared.SourceHash, seeds, prepared.Regions, prepared.ColorHints, fallback.PaletteSize, fallback.FaceContrast }));
     return 0;
 }
 
-if (args.Length < 5 || !long.TryParse(args[3], out var seed))
+if (args.Length < 6 || !long.TryParse(args[3], out var seed))
 {
-    Console.Error.WriteLine("Usage: build <source> <candidate> <seed> <output-dir> [--palette=N] [--background-calm=0..0.5]");
+    Console.Error.WriteLine("Usage: build <source> <candidate> <seed> <output-dir> <face-mesh.png> [--palette=N] [--background-calm=0..0.5]");
     return 2;
 }
 
 var candidatePath = Path.GetFullPath(args[2]);
 var outputDir = Path.GetFullPath(args[4]);
+var landmarkPath = Path.GetFullPath(args[5]);
 Directory.CreateDirectory(outputDir);
 int? paletteColors = null;
 double backgroundCalmAmount = 0;
-foreach (var option in args.Skip(5))
+foreach (var option in args.Skip(6))
 {
     if (option.StartsWith("--palette=", StringComparison.Ordinal) && int.TryParse(option[10..], out var palette)) paletteColors = palette;
     else if (option.StartsWith("--background-calm=", StringComparison.Ordinal)
@@ -49,12 +50,15 @@ foreach (var option in args.Skip(5))
 var reductionOptions = new PortraitReductionOptions(paletteColors, backgroundCalmAmount);
 var sourceBytes = await File.ReadAllBytesAsync(sourcePath);
 var preparedPortrait = builder.Prepare(sourceBytes);
-var pack = builder.Build(await File.ReadAllBytesAsync(candidatePath), preparedPortrait,
+var landmarkPng = await File.ReadAllBytesAsync(landmarkPath);
+var landmarks = FaceMeshLandmarkDetector.Detect(landmarkPng);
+var pack = builder.Build(await File.ReadAllBytesAsync(candidatePath), preparedPortrait, landmarks,
     "815d29b8-3bf4-443f-81ca-ba9263d1ee9f.png", PortraitPackService.Workflow, seed, DateTimeOffset.UtcNow, reductionOptions);
 foreach (var artifact in PortraitReview.Create(pack, preparedPortrait.CropPng, "#9a7cff"))
     await File.WriteAllBytesAsync(Path.Combine(outputDir, artifact.FileName), artifact.Bytes);
 await File.WriteAllBytesAsync(Path.Combine(outputDir, "source-crop.png"), preparedPortrait.CropPng);
 await File.WriteAllBytesAsync(Path.Combine(outputDir, "redraw-source.png"), await File.ReadAllBytesAsync(candidatePath));
+await File.WriteAllBytesAsync(Path.Combine(outputDir, "landmark-source-1024.png"), landmarkPng);
 
 var states = new JsonObject();
 foreach (var state in Enum.GetValues<FaceState>())
@@ -75,6 +79,7 @@ var preview = new JsonObject
     ["paletteSize"] = pack.PaletteSize,
     ["faceContrast"] = pack.FaceContrast,
     ["regions"] = JsonSerializer.SerializeToNode(pack.Regions),
+    ["landmarks"] = JsonSerializer.SerializeToNode(pack.Landmarks),
     ["colorMatch"] = JsonSerializer.SerializeToNode(pack.ColorMatch),
     ["reductionOptions"] = JsonSerializer.SerializeToNode(pack.ReductionOptions),
     ["states"] = states,

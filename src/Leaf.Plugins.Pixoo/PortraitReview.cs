@@ -16,6 +16,11 @@ public static class PortraitReview
             new("colour-regions-64.png", PortraitPackBuilder.EncodePng(PortraitColorMatcher.VisualizeRegions(pack.BasePixels, pack.Regions, pack.FigureMask))),
             new("source-crop-and-base-8x.png", Comparison(sourceCropPng, pack.BasePixels)),
         };
+        if (pack.Landmarks is not null)
+        {
+            files.Add(new("regions-overlay-8x.png", RegionsOverlay(pack)));
+            files.Add(new("blink-eye-crop-16x.png", BlinkEyeContactSheet(pack, 16)));
+        }
         foreach (var state in Enum.GetValues<FaceState>())
         {
             var loop = PortraitAnimation.Render(pack, state, accent, 100);
@@ -80,6 +85,90 @@ public static class PortraitReview
         canvas.Flush();
         return Encode(sheet);
     }
+
+    private static byte[] RegionsOverlay(PortraitPack pack)
+    {
+        const int scale = 8;
+        using var source = Bitmap(pack.BasePixels);
+        using var sheet = source.Resize(new SKSizeI(64 * scale, 64 * scale),
+            new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None))
+            ?? throw new InvalidDataException("Landmark overlay resize failed.");
+        using var canvas = new SKCanvas(sheet);
+        using var left = new SKPaint { Color = new SKColor(255, 214, 10), StrokeWidth = 2, IsAntialias = false, Style = SKPaintStyle.Stroke };
+        using var right = new SKPaint { Color = new SKColor(10, 225, 245), StrokeWidth = 2, IsAntialias = false, Style = SKPaintStyle.Stroke };
+        using var mouth = new SKPaint { Color = new SKColor(38, 235, 96), StrokeWidth = 2, IsAntialias = false, Style = SKPaintStyle.Stroke };
+        DrawPolygon(canvas, pack.Landmarks!.LeftEyeOutline, left, scale);
+        DrawPolygon(canvas, pack.Landmarks.RightEyeOutline, right, scale);
+        DrawLine(canvas, pack.Landmarks.UpperLip, mouth, scale);
+        DrawLine(canvas, pack.Landmarks.LowerLip, mouth, scale);
+        DrawBox(canvas, pack.Regions.LeftEye, left, scale);
+        DrawBox(canvas, pack.Regions.RightEye, right, scale);
+        DrawBox(canvas, pack.Regions.Mouth, mouth, scale);
+        canvas.Flush();
+        return Encode(sheet);
+    }
+
+    private static byte[] BlinkEyeContactSheet(PortraitPack pack, int scale)
+    {
+        var open = pack.BasePixels.ToArray();
+        var closed = pack.BasePixels.ToArray();
+        PortraitAnimation.ApplyBlink(closed, pack.Regions, pack.Landmarks);
+        var eyes = new[] { pack.Regions.LeftEye, pack.Regions.RightEye };
+        var tileWidth = eyes.Max(eye => eye.Width + 2) * scale;
+        var tileHeight = eyes.Max(eye => eye.Height + 2) * scale;
+        using var sheet = new SKBitmap(tileWidth * 4, tileHeight, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        using var canvas = new SKCanvas(sheet);
+        canvas.Clear(SKColors.Black);
+        var index = 0;
+        foreach (var eye in eyes)
+        foreach (var pixels in new[] { open, closed })
+        {
+            using var crop = Crop(pixels, eye, 1);
+            using var enlarged = crop.Resize(new SKSizeI(crop.Width * scale, crop.Height * scale),
+                new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None))
+                ?? throw new InvalidDataException("Eye review resize failed.");
+            canvas.DrawBitmap(enlarged, index++ * tileWidth, 0);
+        }
+        canvas.Flush();
+        return Encode(sheet);
+    }
+
+    private static SKBitmap Crop(byte[] pixels, PixelRegion region, int padding)
+    {
+        var x0 = Math.Max(0, region.X - padding); var y0 = Math.Max(0, region.Y - padding);
+        var x1 = Math.Min(64, region.Right + padding); var y1 = Math.Min(64, region.Bottom + padding);
+        var crop = new SKBitmap(x1 - x0, y1 - y0, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        for (var y = y0; y < y1; y++)
+        for (var x = x0; x < x1; x++)
+        {
+            var i = (y * 64 + x) * 3;
+            crop.SetPixel(x - x0, y - y0, new SKColor(pixels[i], pixels[i + 1], pixels[i + 2]));
+        }
+        return crop;
+    }
+
+    private static void DrawPolygon(SKCanvas canvas, PixelPoint[] points, SKPaint paint, int scale)
+    {
+        if (points.Length < 2) return;
+        using var path = new SKPath();
+        path.MoveTo((points[0].X + .5f) * scale, (points[0].Y + .5f) * scale);
+        foreach (var point in points.Skip(1)) path.LineTo((point.X + .5f) * scale, (point.Y + .5f) * scale);
+        path.Close();
+        canvas.DrawPath(path, paint);
+    }
+
+    private static void DrawLine(SKCanvas canvas, PixelPoint[] points, SKPaint paint, int scale)
+    {
+        if (points.Length < 2) return;
+        using var path = new SKPath();
+        path.MoveTo((points[0].X + .5f) * scale, (points[0].Y + .5f) * scale);
+        foreach (var point in points.Skip(1)) path.LineTo((point.X + .5f) * scale, (point.Y + .5f) * scale);
+        canvas.DrawPath(path, paint);
+    }
+
+    private static void DrawBox(SKCanvas canvas, PixelRegion region, SKPaint paint, int scale)
+        => canvas.DrawRect(region.X * scale + 1, region.Y * scale + 1,
+            region.Width * scale - 2, region.Height * scale - 2, paint);
 
     private static byte[] Comparison(byte[] cropPng, byte[] basePixels)
     {

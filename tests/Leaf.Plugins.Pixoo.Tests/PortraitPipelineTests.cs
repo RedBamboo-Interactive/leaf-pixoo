@@ -23,6 +23,59 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
+    public void Current_portrait_regions_match_high_resolution_landmarks_and_validate_geometry()
+    {
+        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
+        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
+            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var regions = landmarks.ApplyTo(scaffold);
+        var basePixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var validation = new PortraitPackBuilder().Validate(basePixels, regions, landmarks: landmarks);
+
+        AssertRegionNear(new PixelRegion(22, 22, 6, 5), regions.LeftEye);
+        AssertRegionNear(new PixelRegion(29, 20, 7, 5), regions.RightEye);
+        AssertRegionNear(new PixelRegion(27, 28, 8, 6), regions.Mouth);
+        var mouthRow = landmarks.LipLine.Average(point => point.Y);
+        Assert.True(mouthRow > landmarks.LeftEyeOutline.Average(point => point.Y));
+        Assert.True(mouthRow > landmarks.RightEyeOutline.Average(point => point.Y));
+        Assert.True(validation.Valid, string.Join("; ", validation.Errors));
+    }
+
+    [Fact]
+    public void Validation_rejects_landmarks_outside_the_face_or_mouth_above_the_eyes()
+    {
+        var valid = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
+        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
+            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var invalid = valid with
+        {
+            LeftEyeOutline = [new(2, 2), new(4, 2), new(4, 4), new(2, 4)],
+            UpperLip = valid.UpperLip.Select(point => point with { Y = 10 }).ToArray(),
+            LowerLip = valid.LowerLip.Select(point => point with { Y = 11 }).ToArray(),
+        };
+        var regions = invalid.ApplyTo(scaffold);
+        var validation = new PortraitPackBuilder().Validate(
+            PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png")), regions, landmarks: invalid);
+
+        Assert.False(validation.Valid);
+        Assert.Contains(validation.Errors, error => error.Contains("inside the face", StringComparison.Ordinal));
+        Assert.Contains(validation.Errors, error => error.Contains("below both eyes", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Missing_face_mesh_fails_instead_of_guessing_regions()
+    {
+        using var blank = new SKBitmap(1024, 1024, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        blank.Erase(SKColors.Black);
+        using var image = SKImage.FromBitmap(blank);
+        using var png = image.Encode(SKEncodedImageFormat.Png, 100);
+
+        var error = Assert.Throws<InvalidDataException>(() => FaceMeshLandmarkDetector.Detect(png.ToArray()));
+
+        Assert.Contains("not found", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Quantization_is_deterministic_and_bounded_without_dithering()
     {
         var pixels = new byte[RgbFrame.ByteCount];
@@ -277,5 +330,23 @@ public sealed class PortraitPipelineTests
             var i = pixel * 3;
             pixels[i] = r; pixels[i + 1] = g; pixels[i + 2] = b;
         }
+    }
+
+    private static byte[] Fixture(string suffix)
+    {
+        var assembly = typeof(PortraitPipelineTests).Assembly;
+        var name = assembly.GetManifestResourceNames().Single(resource => resource.EndsWith(suffix, StringComparison.Ordinal));
+        using var stream = assembly.GetManifestResourceStream(name)!;
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    private static void AssertRegionNear(PixelRegion expected, PixelRegion actual)
+    {
+        Assert.InRange(actual.X, expected.X - 1, expected.X + 1);
+        Assert.InRange(actual.Y, expected.Y - 1, expected.Y + 1);
+        Assert.InRange(actual.Width, expected.Width - 1, expected.Width + 1);
+        Assert.InRange(actual.Height, expected.Height - 1, expected.Height + 1);
     }
 }
