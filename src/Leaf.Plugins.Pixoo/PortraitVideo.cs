@@ -5,14 +5,21 @@ namespace Leaf.Plugins.Pixoo;
 
 public sealed record PortraitClipSettings
 {
-    public int Width { get; init; } = 768;
-    public int Height { get; init; } = 576;
+    public int Width { get; init; } = 384;
+    public int Height { get; init; } = 384;
     public int SourceFrames { get; init; } = 41;
-    public int InterpolationMultiplier { get; init; } = 2;
-    public int Steps { get; init; } = 30;
-    public int SampleStride { get; init; } = 4;
-    public int FrameDurationMs { get; init; } = 133;
+    public int Steps { get; init; } = 4;
+    public int SamplerSplit { get; init; } = 2;
+    public int OutputFps { get; init; } = 15;
+    public int SampleStride { get; init; } = 2;
+    public int FrameDurationMs { get; init; } = 128;
     public int MaximumLoopFrames { get; init; } = 30;
+    public int SlowWidth { get; init; } = 768;
+    public int SlowHeight { get; init; } = 576;
+    public int SlowSteps { get; init; } = 30;
+    public int SlowInterpolationMultiplier { get; init; } = 2;
+    public int SlowSampleStride { get; init; } = 4;
+    public int SlowFrameDurationMs { get; init; } = 133;
     public int MaximumAttemptsPerClip { get; init; } = 2;
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
@@ -134,18 +141,23 @@ public sealed class FfmpegVideoFrameDecoder : IVideoFrameDecoder
 
 public static class PortraitClipProcessor
 {
-    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, VideoPlateGeometry plate,
-        PortraitClipSettings settings)
+    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, PortraitClipSettings settings)
+        => BuildMotionLoop(decoded, settings.Width, settings.Height,
+            new ImageRect(0, 0, settings.Width, settings.Height), settings.SampleStride,
+            settings.FrameDurationMs, settings.MaximumLoopFrames);
+
+    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, int width, int height,
+        ImageRect crop, int sampleStride, int frameDurationMs, int maximumFrames)
     {
         if (decoded.Count < 2) throw new InvalidDataException("A loop needs at least two video frames so the duplicate closing frame can be dropped.");
-        var frames = SampleIndices(decoded.Count, settings.SampleStride, settings.MaximumLoopFrames)
+        var frames = SampleIndices(decoded.Count, sampleStride, maximumFrames)
             .Select(index =>
             {
                 var frame = decoded[index];
-                if (frame.Width != plate.OutputWidth || frame.Height != plate.OutputHeight)
-                    throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {plate.OutputWidth}x{plate.OutputHeight}.");
-                var pixels = PortraitPackBuilder.BoxDownsampleRgb(frame.Pixels, frame.Width, frame.Height, plate.OutputSquare);
-                return new RgbFrame(pixels, settings.FrameDurationMs);
+                if (frame.Width != width || frame.Height != height)
+                    throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {width}x{height}.");
+                var pixels = PortraitPackBuilder.BoxDownsampleRgb(frame.Pixels, frame.Width, frame.Height, crop);
+                return new RgbFrame(pixels, frameDurationMs);
             }).ToArray();
         return new FrameLoop(frames).Validate();
     }

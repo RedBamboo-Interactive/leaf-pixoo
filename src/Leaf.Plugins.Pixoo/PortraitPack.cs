@@ -31,6 +31,7 @@ public sealed record PortraitClipProvenance(
     string LoopAssetId,
     string Prompt,
     string Negative,
+    string? Note,
     DateTimeOffset GeneratedAt);
 
 public sealed record PortraitClip(FrameLoop Loop, PortraitClipProvenance Provenance);
@@ -50,10 +51,13 @@ public sealed record PortraitPack(
 
 public sealed record PreparedPortrait(
     byte[] CropPng,
-    byte[] PlatePng,
     byte[] BasePixels,
-    VideoPlateGeometry Plate,
+    ImageRect SourceSquare,
+    int SourceWidth,
+    int SourceHeight,
     string SourceHash);
+
+public sealed record SlowFallbackPlate(byte[] Png, VideoPlateGeometry Geometry);
 
 public static class PortraitSourceFingerprint
 {
@@ -64,26 +68,49 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-video-v1";
+    public const string PipelineVersion = "portrait-video-v2-lightx2v";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
         using var source = SKBitmap.Decode(sourceBytes) ?? throw new InvalidDataException("Source portrait could not be decoded.");
         var face = FindFaceWindow(source);
-        var maxSquareForPlate = Math.Min(source.Height, source.Width * 3 / 4);
-        if (maxSquareForPlate < 64) throw new InvalidDataException("Source portrait is too narrow for a 4:3 video plate.");
         var side = (int)Math.Round(Math.Max(face.Width, face.Height) * 2.12);
-        side = Math.Clamp(side, Math.Min(source.Width, source.Height) / 2, maxSquareForPlate);
+        side = Math.Clamp(side, Math.Min(source.Width, source.Height) / 2, Math.Min(source.Width, source.Height));
         var centerX = face.Left + face.Width / 2;
         var x = Math.Clamp(centerX - side / 2, 0, source.Width - side);
         var y = Math.Clamp((int)Math.Round(face.Top - face.Height * .30), 0, source.Height - side);
         var square = new ImageRect(x, y, side, side);
-        var plate = BuildPlateGeometry(square, source.Width, source.Height);
         using var crop = Crop(source, square);
-        using var plateBitmap = CropAndResize(source, plate.SourcePlate, plate.OutputWidth, plate.OutputHeight);
         var cropPng = EncodePng(crop);
-        return new(cropPng, EncodePng(plateBitmap), BoxDownsample(crop, 64, 64), plate,
+        return new(cropPng, BoxDownsample(crop, 64, 64), square, source.Width, source.Height,
             PortraitSourceFingerprint.Hash(sourceBytes));
+    }
+
+    public SlowFallbackPlate BuildSlowFallbackPlate(byte[] sourceBytes, PreparedPortrait prepared)
+    {
+        using var source = SKBitmap.Decode(sourceBytes) ?? throw new InvalidDataException("Source portrait could not be decoded.");
+        if (source.Width != prepared.SourceWidth || source.Height != prepared.SourceHeight)
+            throw new InvalidDataException("Source dimensions changed while preparing the slow fallback plate.");
+        if ((int)Math.Round(prepared.SourceSquare.Height * 4d / 3d) <= source.Width)
+        {
+            var geometry = BuildPlateGeometry(prepared.SourceSquare, source.Width, source.Height);
+            using var plate = CropAndResize(source, geometry.SourcePlate, geometry.OutputWidth, geometry.OutputHeight);
+            return new(EncodePng(plate), geometry);
+        }
+
+        // The fast path has no landscape constraint. If its square cannot be widened inside a narrow source,
+        // letterbox only the exceptional slow fallback; the mapped square is cropped back out after decoding.
+        using var crop = Crop(source, prepared.SourceSquare);
+        using var letterboxed = new SKBitmap(768, 576, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        letterboxed.Erase(SKColors.Black);
+        using (var canvas = new SKCanvas(letterboxed))
+        {
+            canvas.DrawBitmap(crop, new SKRect(96, 0, 672, 576));
+            canvas.Flush();
+        }
+        var fallbackGeometry = new VideoPlateGeometry(prepared.SourceSquare, prepared.SourceSquare,
+            new ImageRect(96, 0, 576, 576));
+        return new(EncodePng(letterboxed), fallbackGeometry);
     }
 
     public PortraitPack BuildBase(PreparedPortrait prepared, string sourceAssetId, DateTimeOffset generatedAt)

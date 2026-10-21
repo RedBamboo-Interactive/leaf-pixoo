@@ -13,13 +13,13 @@ public sealed class PortraitPipelineTests
 
         Assert.Equal(expected, prepared.BasePixels);
         Assert.Equal(RgbFrame.ByteCount, prepared.BasePixels.Length);
-        using var plate = SKBitmap.Decode(prepared.PlatePng);
-        Assert.Equal(768, plate.Width);
-        Assert.Equal(576, plate.Height);
+        using var crop = SKBitmap.Decode(prepared.CropPng);
+        Assert.Equal(crop.Width, crop.Height);
+        Assert.Equal(prepared.SourceSquare.Width, crop.Width);
     }
 
     [Fact]
-    public void Plate_widens_square_to_four_by_three_and_maps_square_back_to_video_space()
+    public void Slow_fallback_plate_widens_square_and_maps_it_back_to_video_space()
     {
         var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
 
@@ -32,7 +32,7 @@ public sealed class PortraitPipelineTests
     [Theory]
     [InlineData(0, 0)]
     [InlineData(700, 600)]
-    public void Plate_clamps_at_source_edges_without_moving_the_square(int squareX, int expectedPlateX)
+    public void Slow_fallback_plate_clamps_at_source_edges_without_moving_the_square(int squareX, int expectedPlateX)
     {
         var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(squareX, 80, 300, 300), 1000, 800);
 
@@ -42,30 +42,29 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Sampling_drops_duplicate_last_frame_and_takes_every_fourth()
+    public void Fast_sampling_drops_duplicate_last_frame_and_takes_every_second()
     {
-        var selected = PortraitClipProcessor.SampleIndices(81, 4, 30);
+        var selected = PortraitClipProcessor.SampleIndices(41, 2, 30);
 
         Assert.Equal(20, selected.Length);
-        Assert.Equal(Enumerable.Range(0, 20).Select(value => value * 4), selected);
-        Assert.DoesNotContain(80, selected);
+        Assert.Equal(Enumerable.Range(0, 20).Select(value => value * 2), selected);
+        Assert.DoesNotContain(40, selected);
     }
 
     [Fact]
     public void Motion_loop_uses_uniform_timing_and_still_loop_is_separate()
     {
-        var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
-        var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
+        var decoded = Enumerable.Range(0, 41).Select(VideoFrame).ToArray();
         var settings = new PortraitClipSettings();
 
-        var motion = PortraitClipProcessor.BuildMotionLoop(decoded, plate, settings);
+        var motion = PortraitClipProcessor.BuildMotionLoop(decoded, settings);
         var stillPixels = Enumerable.Repeat((byte)91, RgbFrame.ByteCount).ToArray();
         var still = PortraitClipProcessor.BuildStillLoop(stillPixels);
 
         Assert.Equal(20, motion.Frames.Count);
-        Assert.All(motion.Frames, frame => Assert.Equal(133, frame.DurationMs));
-        Assert.All(motion.Frames[1].Pixels, value => Assert.Equal((byte)4, value));
-        Assert.All(motion.Frames[^1].Pixels, value => Assert.Equal((byte)76, value));
+        Assert.All(motion.Frames, frame => Assert.Equal(128, frame.DurationMs));
+        Assert.All(motion.Frames[1].Pixels, value => Assert.Equal((byte)2, value));
+        Assert.All(motion.Frames[^1].Pixels, value => Assert.Equal((byte)38, value));
         Assert.Single(still.Frames);
         Assert.Equal(1000, still.Frames[0].DurationMs);
         Assert.Equal(stillPixels, still.Frames[0].Pixels);
@@ -75,12 +74,10 @@ public sealed class PortraitPipelineTests
     [Fact]
     public void Loop_never_exceeds_thirty_frames()
     {
-        var plate = new VideoPlateGeometry(new(0, 0, 576, 576), new(0, 0, 768, 576),
-            new(0, 0, 576, 576));
         var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
         var settings = new PortraitClipSettings { SampleStride = 1, MaximumLoopFrames = 30 };
 
-        var loop = PortraitClipProcessor.BuildMotionLoop(decoded, plate, settings);
+        var loop = PortraitClipProcessor.BuildMotionLoop(decoded, settings);
 
         Assert.Equal(30, loop.Frames.Count);
         Assert.All(loop.Frames[^1].Pixels, value => Assert.Equal((byte)29, value));
@@ -189,7 +186,7 @@ public sealed class PortraitPipelineTests
     }
 
     private static DecodedVideoFrame VideoFrame(int value)
-        => new(Enumerable.Repeat((byte)value, 768 * 576 * 3).ToArray(), 768, 576);
+        => new(Enumerable.Repeat((byte)value, 384 * 384 * 3).ToArray(), 384, 384);
 
     private static PortraitPack Pack(byte[] pixels, params PortraitClip[] clips)
         => new(pixels, new("source", "hash", PortraitPackBuilder.PipelineVersion, DateTimeOffset.UnixEpoch),
@@ -197,7 +194,8 @@ public sealed class PortraitPipelineTests
 
     private static PortraitClip Clip(FaceState state, byte[] pixels)
         => new(new FrameLoop([new RgbFrame(pixels, 133)]),
-            new(state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", DateTimeOffset.UnixEpoch));
+            new(state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", null,
+                DateTimeOffset.UnixEpoch));
 
     private static byte[] SyntheticPortrait()
     {

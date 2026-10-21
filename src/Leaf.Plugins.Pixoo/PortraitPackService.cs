@@ -37,7 +37,10 @@ public sealed class PortraitPackService(
 {
     public const string PackEntityType = "pixoo-portrait-pack";
     public const string Workflow = "wan-22-i2v-first-last-portrait-film-60fps-4a256f5b";
-    private const string GenerateUrl = "http://127.0.0.1:18804/api/apps/provider-comfyui/workflows/wan-22-i2v-first-last-portrait-film-60fps-4a256f5b/generate";
+    public const string QuietWorkflow = "wan-video-22-quiet-reportage-film-60fps-88c61e77";
+    private const string SlowGenerateUrl = "http://127.0.0.1:18804/api/apps/provider-comfyui/workflows/wan-22-i2v-first-last-portrait-film-60fps-4a256f5b/generate";
+    private const string RawGenerateUrl = "http://127.0.0.1:18800/image-gen/generate?async=true";
+    private const string ComputeBaseUrl = "http://127.0.0.1:18800";
     private readonly PortraitPackBuilder builder = new();
     private readonly ConcurrentDictionary<Guid, PortraitPack> current = new();
     private readonly AgentSingleFlight<PortraitPack?> builds = new();
@@ -133,37 +136,63 @@ public sealed class PortraitPackService(
                 return pack;
             }
 
-            await using var plateStream = new MemoryStream(prepared.PlatePng, writable: false);
-            var plateAsset = await assets.UploadIdempotentAsync(plateStream,
-                $"pixoo:{PortraitPackBuilder.PipelineVersion}:plate:{source.Hash}",
-                $"pixoo-{agentId:N}-video-plate.png", "image/png", ct);
+            var fastWorkflow = await ResolveFastWorkflowAsync(ct);
+            var fallbackReason = fastWorkflow.Reason;
+            byte[] generationImage;
+            VideoPlateGeometry? slowGeometry = null;
+            string inputKind;
+            if (fastWorkflow.Template is not null)
+            {
+                generationImage = prepared.CropPng;
+                inputKind = "square";
+            }
+            else
+            {
+                var slowPlate = builder.BuildSlowFallbackPlate(source.Bytes, prepared);
+                generationImage = slowPlate.Png;
+                slowGeometry = slowPlate.Geometry;
+                inputKind = "slow-fallback-plate";
+            }
+            await using var inputStream = new MemoryStream(generationImage, writable: false);
+            var inputAsset = await assets.UploadIdempotentAsync(inputStream,
+                $"pixoo:{PortraitPackBuilder.PipelineVersion}:{inputKind}:{source.Hash}",
+                $"pixoo-{agentId:N}-{inputKind}.png", "image/png", ct);
             var failures = new List<string>();
             await PortraitClipPlan.ExecuteAsync(async (state, attempt, token) =>
             {
                 if (!force && pack.Clips.ContainsKey(state))
                 {
-                    SetClip(agentId, state, "ready", 0, pack.Clips[state].Provenance.JobId, null);
+                    SetClip(agentId, state, "ready", 0, pack.Clips[state].Provenance.JobId,
+                        pack.Clips[state].Provenance.Note);
                     return true;
                 }
                 var seed = SeedFor(source.Hash, state, attempt);
                 string? admittedJobId = null;
-                SetClip(agentId, state, "generating", attempt, null, null);
+                SetClip(agentId, state, fastWorkflow.Template is null ? "generating-slow-fallback" : "generating",
+                    attempt, null, fallbackReason);
                 try
                 {
                     var prompt = PortraitClipPrompts.For(state, source.OutfitDescription);
-                    var generated = await GenerateClipAsync(agentId, source, state, prompt, plateAsset.Url, seed,
+                    var generated = await GenerateClipAsync(agentId, source, state, prompt, inputAsset.Url, seed,
+                        fastWorkflow.Template, fallbackReason,
                         jobId =>
                         {
                             admittedJobId = jobId;
-                            SetClip(agentId, state, "generating", attempt, jobId, null);
+                            SetClip(agentId, state,
+                                fastWorkflow.Template is null ? "generating-slow-fallback" : "generating",
+                                attempt, jobId, fallbackReason);
                         }, token);
-                    SetClip(agentId, state, "processing", attempt, generated.JobId, null);
-                    var decoded = await decoder.DecodeAsync(generated.Bytes, settings.Width, settings.Height, token);
-                    var loop = PortraitClipProcessor.BuildMotionLoop(decoded, prepared.Plate, settings);
+                    SetClip(agentId, state, "processing", attempt, generated.JobId, generated.Note);
+                    var decoded = await decoder.DecodeAsync(generated.Bytes, generated.Width, generated.Height, token);
+                    var loop = generated.Fast
+                        ? PortraitClipProcessor.BuildMotionLoop(decoded, settings)
+                        : PortraitClipProcessor.BuildMotionLoop(decoded, settings.SlowWidth, settings.SlowHeight,
+                            slowGeometry!.OutputSquare, settings.SlowSampleStride,
+                            settings.SlowFrameDurationMs, settings.MaximumLoopFrames);
                     var clip = await StoreClipAsync(source, state, prompt, seed, generated, loop, token);
                     pack = pack.WithClip(clip);
                     entityId = await StoreEntityAsync(source, prepared, pack, entityId, token);
-                    SetClip(agentId, state, "ready", attempt, generated.JobId, null);
+                    SetClip(agentId, state, "ready", attempt, generated.JobId, generated.Note);
                     await ActivateAsync(agentId, pack);
                     return true;
                 }
@@ -214,31 +243,77 @@ public sealed class PortraitPackService(
         }
     }
 
+    private async Task<FastWorkflowResolution> ResolveFastWorkflowAsync(CancellationToken ct)
+    {
+        var firstLast = await entities.GetBySlugAsync("comfyui-workflow", Workflow, ct);
+        if (firstLast is null)
+            return new(null, $"Fast graph unavailable: workflow entity '{Workflow}' is missing; using registered slow workflow.");
+        var quiet = await entities.GetBySlugAsync("comfyui-workflow", QuietWorkflow, ct);
+        if (quiet is null)
+            return new(null, $"Fast graph unavailable: workflow entity '{QuietWorkflow}' is missing; using registered slow workflow.");
+        try
+        {
+            return new(FastPortraitWorkflow.Prepare(firstLast, quiet, settings), null);
+        }
+        catch (FastWorkflowUnavailableException ex)
+        {
+            return new(null, $"Fast graph unavailable: {Compact(ex.Message, 300)}; using registered slow workflow.");
+        }
+    }
+
     private async Task<GeneratedVideo> GenerateClipAsync(Guid agentId, SourcePortrait source, FaceState state,
-        PortraitClipPrompt prompt, string plateUrl, long seed, Action<string> admitted, CancellationToken ct)
+        PortraitClipPrompt prompt, string imageAssetUrl, long seed, FastPortraitWorkflowTemplate? fastWorkflow,
+        string? fallbackReason, Action<string> admitted, CancellationToken ct)
     {
         var token = RequireExecutionTokens().IssueSystem(new PluginSystemExecutionTokenRequest(
             "plugin", PixooPlugin.Id, "Leaf Pixoo", $"Generate the selected Agent's {Slug(state)} display loop",
             [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], TimeSpan.FromMinutes(20)));
-        var imageUrl = $"http://127.0.0.1:18804{plateUrl}";
+        var imageUrl = LeafAssetUrl(imageAssetUrl);
+        if (fastWorkflow is not null)
+        {
+            var body = fastWorkflow.CreateSubmission(prompt, imageUrl, seed, state, source.Hash);
+            using var request = new HttpRequestMessage(HttpMethod.Post, RawGenerateUrl)
+            {
+                Content = JsonContent.Create(body),
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+            request.Headers.TryAddWithoutValidation("X-Async", "true");
+            request.Headers.TryAddWithoutValidation("X-Idempotency-Key",
+                $"pixoo:{PortraitPackBuilder.PipelineVersion}:{source.Hash}:{Slug(state)}:{seed}");
+            var jobId = await AdmitAsync(request, state, admitted, ct);
+            var bytes = await AwaitVideoAsync(jobId, state, token.AccessToken, ct);
+            return new(jobId, bytes, settings.Width, settings.Height, true,
+                FastPortraitWorkflowTemplate.Variant, null);
+        }
+
         var inputs = new JsonObject
         {
             ["prompt"] = prompt.Prompt,
             ["negative"] = prompt.Negative,
             ["image"] = imageUrl,
             ["end_image"] = imageUrl,
-            ["width"] = settings.Width,
-            ["height"] = settings.Height,
+            ["width"] = settings.SlowWidth,
+            ["height"] = settings.SlowHeight,
             ["frames"] = settings.SourceFrames,
-            ["interpolation_multiplier"] = settings.InterpolationMultiplier,
-            ["steps"] = settings.Steps,
+            ["interpolation_multiplier"] = settings.SlowInterpolationMultiplier,
+            ["steps"] = settings.SlowSteps,
             ["seed"] = seed,
         };
-        using var request = new HttpRequestMessage(HttpMethod.Post, GenerateUrl)
+        using var slowRequest = new HttpRequestMessage(HttpMethod.Post, SlowGenerateUrl)
         {
             Content = JsonContent.Create(new JsonObject { ["wait"] = false, ["inputs"] = inputs }),
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+        slowRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+        slowRequest.Headers.TryAddWithoutValidation("X-Idempotency-Key",
+            $"pixoo:{PortraitPackBuilder.PipelineVersion}:slow:{source.Hash}:{Slug(state)}:{seed}");
+        var slowJobId = await AdmitAsync(slowRequest, state, admitted, ct);
+        var slowBytes = await AwaitVideoAsync(slowJobId, state, token.AccessToken, ct);
+        return new(slowJobId, slowBytes, settings.SlowWidth, settings.SlowHeight, false, Workflow, fallbackReason);
+    }
+
+    private async Task<string> AdmitAsync(HttpRequestMessage request, FaceState state,
+        Action<string> admitted, CancellationToken ct)
+    {
         using var response = await http.SendAsync(request, ct);
         var admissionText = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
@@ -246,14 +321,18 @@ public sealed class PortraitPackService(
         var jobId = JsonNode.Parse(admissionText)?["jobId"]?.GetValue<string>();
         if (!Guid.TryParse(jobId, out _)) throw new InvalidOperationException("Clip admission returned no durable job id.");
         admitted(jobId);
+        return jobId;
+    }
 
+    private async Task<byte[]> AwaitVideoAsync(string jobId, FaceState state, string accessToken, CancellationToken ct)
+    {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromMinutes(15));
         JsonObject? job;
         do
         {
             using var poll = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:18800/jobs/{jobId}?waitSeconds=25");
-            poll.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+            poll.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             using var polled = await http.SendAsync(poll, deadline.Token);
             polled.EnsureSuccessStatusCode();
             job = JsonNode.Parse(await polled.Content.ReadAsStringAsync(deadline.Token)) as JsonObject;
@@ -262,26 +341,32 @@ public sealed class PortraitPackService(
         if (!string.Equals(status, "Completed", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"{Slug(state)} clip job {jobId} ended as {status ?? "unknown"}.");
 
-        using var output = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:18800/image-gen/jobs/{jobId}/output");
-        output.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
+        var outputs = (job?["outputs"] as JsonArray)?.OfType<JsonObject>().ToArray() ?? [];
+        var selectedOutput = outputs.FirstOrDefault(value =>
+                Text(value, "contentType")?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true)
+            ?? outputs.FirstOrDefault();
+        var outputPath = selectedOutput is null ? null : Text(selectedOutput, "url");
+        if (string.IsNullOrWhiteSpace(outputPath))
+            throw new InvalidOperationException($"Clip job {jobId} completed without an output URL.");
+        if (!outputPath.StartsWith("/", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Clip job {jobId} returned a non-relative output URL.");
+        using var output = new HttpRequestMessage(HttpMethod.Get, new Uri(new Uri(ComputeBaseUrl), outputPath));
+        output.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         using var downloaded = await http.SendAsync(output, deadline.Token);
         downloaded.EnsureSuccessStatusCode();
-        return new(jobId, await downloaded.Content.ReadAsByteArrayAsync(deadline.Token));
+        return await downloaded.Content.ReadAsByteArrayAsync(deadline.Token);
     }
 
     private async Task<StoredPortrait> StoreInitialAsync(SourcePortrait source, PreparedPortrait prepared,
         PortraitPack pack, CancellationToken ct)
     {
         await using var cropStream = new MemoryStream(prepared.CropPng, writable: false);
-        await using var plateStream = new MemoryStream(prepared.PlatePng, writable: false);
         await using var baseStream = new MemoryStream(PortraitPackBuilder.EncodePng(pack.BasePixels), writable: false);
         var crop = await assets.UploadIdempotentAsync(cropStream,
             $"pixoo:{PortraitPackBuilder.PipelineVersion}:crop:{source.Hash}", "pixoo-portrait-crop.png", "image/png", ct);
-        var plate = await assets.UploadIdempotentAsync(plateStream,
-            $"pixoo:{PortraitPackBuilder.PipelineVersion}:plate:{source.Hash}", "pixoo-video-plate.png", "image/png", ct);
         var baseAsset = await assets.UploadIdempotentAsync(baseStream,
             $"pixoo:{PortraitPackBuilder.PipelineVersion}:base:{source.Hash}", "pixoo-portrait-base.png", "image/png", ct);
-        var data = EntityData(source, prepared, pack, crop.AssetId, plate.AssetId, baseAsset.AssetId);
+        var data = EntityData(source, prepared, pack, crop.AssetId, baseAsset.AssetId);
         var entity = await entities.CreateAsync(PackEntityType, $"{source.AgentName} display pack {source.Hash[..8]}", data, ct);
         return new(entity.Id, pack);
     }
@@ -296,24 +381,21 @@ public sealed class PortraitPackService(
             $"pixoo-{Slug(state)}.mp4", "video/mp4", ct);
         var reduced = await assets.UploadIdempotentAsync(loopStream, $"{stem}:loop",
             $"pixoo-{Slug(state)}-64x64.json", "application/json", ct);
-        return new(loop, new(state, Workflow, seed, generated.JobId, video.AssetId, reduced.AssetId,
-            prompt.Prompt, prompt.Negative, DateTimeOffset.UtcNow));
+        return new(loop, new(state, generated.Workflow, seed, generated.JobId, video.AssetId, reduced.AssetId,
+            prompt.Prompt, prompt.Negative, generated.Note, DateTimeOffset.UtcNow));
     }
 
     private async Task<Guid> StoreEntityAsync(SourcePortrait source, PreparedPortrait prepared, PortraitPack pack,
         Guid? entityId, CancellationToken ct)
     {
         await using var cropStream = new MemoryStream(prepared.CropPng, writable: false);
-        await using var plateStream = new MemoryStream(prepared.PlatePng, writable: false);
         await using var baseStream = new MemoryStream(PortraitPackBuilder.EncodePng(pack.BasePixels), writable: false);
         var crop = await assets.UploadIdempotentAsync(cropStream,
             $"pixoo:{PortraitPackBuilder.PipelineVersion}:crop:{source.Hash}", "pixoo-portrait-crop.png", "image/png", ct);
-        var plate = await assets.UploadIdempotentAsync(plateStream,
-            $"pixoo:{PortraitPackBuilder.PipelineVersion}:plate:{source.Hash}", "pixoo-video-plate.png", "image/png", ct);
         var baseAsset = await assets.UploadIdempotentAsync(baseStream,
             $"pixoo:{PortraitPackBuilder.PipelineVersion}:base:{source.Hash}", "pixoo-portrait-base.png", "image/png", ct);
         var name = $"{source.AgentName} display pack {source.Hash[..8]}";
-        var data = EntityData(source, prepared, pack, crop.AssetId, plate.AssetId, baseAsset.AssetId);
+        var data = EntityData(source, prepared, pack, crop.AssetId, baseAsset.AssetId);
         if (entityId is { } id)
         {
             await entities.ReplaceDataAsync(id, data, name, ct);
@@ -323,7 +405,7 @@ public sealed class PortraitPackService(
     }
 
     private static JsonObject EntityData(SourcePortrait source, PreparedPortrait prepared, PortraitPack pack,
-        string cropAssetId, string plateAssetId, string baseAssetId)
+        string cropAssetId, string baseAssetId)
     {
         var clips = new JsonObject();
         foreach (var (state, clip) in pack.Clips)
@@ -338,6 +420,7 @@ public sealed class PortraitPackService(
                 ["loop_asset"] = provenance.LoopAssetId,
                 ["prompt"] = provenance.Prompt,
                 ["negative"] = provenance.Negative,
+                ["note"] = provenance.Note,
                 ["generated_at"] = provenance.GeneratedAt,
             };
         }
@@ -350,9 +433,8 @@ public sealed class PortraitPackService(
             ["pipeline_version"] = PortraitPackBuilder.PipelineVersion,
             ["generated_at"] = pack.Provenance.GeneratedAt,
             ["crop_asset"] = cropAssetId,
-            ["plate_asset"] = plateAssetId,
             ["base_asset"] = baseAssetId,
-            ["plate"] = PlateJson(prepared.Plate),
+            ["source_square"] = RectJson(prepared.SourceSquare),
             ["clips"] = clips,
         };
     }
@@ -394,6 +476,7 @@ public sealed class PortraitPackService(
                             loopId,
                             Text(value, "prompt") ?? string.Empty,
                             Text(value, "negative") ?? string.Empty,
+                            Text(value, "note"),
                             value["generated_at"]?.GetValue<DateTimeOffset>() ?? entity.CreatedAt));
                     }
                 }
@@ -450,7 +533,8 @@ public sealed class PortraitPackService(
         return PortraitClipPlan.GenerationOrder.Select(state => values?.GetValueOrDefault(state)
             ?? new(state, current.GetValueOrDefault(agentId)?.Clips.ContainsKey(state) == true ? "ready" : "pending",
                 0, current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(state)?.Provenance.JobId,
-                null, DateTimeOffset.UtcNow)).ToArray();
+                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(state)?.Provenance.Note,
+                DateTimeOffset.UtcNow)).ToArray();
     }
 
     private static bool HasAllPrimaryClips(PortraitPack pack)
@@ -487,11 +571,6 @@ public sealed class PortraitPackService(
         }).ToArray()).Validate();
     }
 
-    private static JsonObject PlateJson(VideoPlateGeometry plate) => new()
-    {
-        ["source_square"] = RectJson(plate.SourceSquare), ["source_plate"] = RectJson(plate.SourcePlate),
-        ["output_square"] = RectJson(plate.OutputSquare), ["width"] = plate.OutputWidth, ["height"] = plate.OutputHeight,
-    };
     private static JsonObject RectJson(ImageRect rect) => new()
         { ["x"] = rect.X, ["y"] = rect.Y, ["width"] = rect.Width, ["height"] = rect.Height };
     private static string Slug(FaceState state) => state.ToString().ToLowerInvariant();
@@ -502,6 +581,10 @@ public sealed class PortraitPackService(
         var compact = string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         return compact[..Math.Min(maximum, compact.Length)];
     }
+    private static string LeafAssetUrl(string value)
+        => Uri.TryCreate(value, UriKind.Absolute, out var absolute)
+            ? absolute.ToString()
+            : $"http://127.0.0.1:18804/{value.TrimStart('/')}";
     private static string? Avatar(JsonObject value) => Text(value, "avatar")
         ?? (value["avatar"] as JsonObject is { } avatar ? Text(avatar, "filename") ?? Text(avatar, "url") : null);
     private static string? AssetId(string? value)
@@ -515,6 +598,8 @@ public sealed class PortraitPackService(
 
     private sealed record SourcePortrait(Guid AgentId, string AgentName, string OwnerId, string AssetId,
         byte[] Bytes, string Hash, string? OutfitDescription);
-    private sealed record GeneratedVideo(string JobId, byte[] Bytes);
+    private sealed record GeneratedVideo(string JobId, byte[] Bytes, int Width, int Height, bool Fast,
+        string Workflow, string? Note);
+    private sealed record FastWorkflowResolution(FastPortraitWorkflowTemplate? Template, string? Reason);
     private sealed record StoredPortrait(Guid EntityId, PortraitPack Pack);
 }
