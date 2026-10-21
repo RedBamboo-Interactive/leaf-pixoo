@@ -46,9 +46,10 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
 
   useEffect(()=>{
     if(selected&&devices.some(item=>item.id===selected))return
-    const next=devices.length===1?devices[0]?.id??'':''
+    // Open the first display on desktop; on phone only jump to the detail tab when there is one.
+    const next=devices[0]?.id??''
     setSelected(next)
-    if(next)setMobileTab(1)
+    if(next&&devices.length===1)setMobileTab(1)
   },[devices,selected])
 
   useEffect(()=>setName(device?.name??''),[device?.id,device?.name])
