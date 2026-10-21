@@ -70,7 +70,24 @@ public sealed class Pixoo64Sink(HttpClient http) : IDisplaySink
 
     private async Task Post(Uri endpoint, JsonObject payload, CancellationToken ct)
     {
-        using var response = await http.PostAsJsonAsync(endpoint, payload, ct);
+        // The Pixoo's embedded HTTP server cannot read chunked bodies (PostAsJsonAsync streams without a
+        // Content-Length) and answers HTTP 200 with {"error_code":"Request data illegal json"}. Send a
+        // buffered body and treat any non-zero error_code as a failed push.
+        using var content = new StringContent(payload.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+        using var response = await http.PostAsync(endpoint, content, ct);
         response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadAsStringAsync(ct);
+        EnsureDeviceAccepted(payload["Command"]?.GetValue<string>() ?? "?", body);
+    }
+
+    internal static void EnsureDeviceAccepted(string command, string body)
+    {
+        JsonNode? code;
+        try { code = JsonNode.Parse(body)?["error_code"]; }
+        catch (System.Text.Json.JsonException) { throw new InvalidOperationException($"Pixoo returned non-JSON for {command}."); }
+        var accepted = code is JsonValue value
+            && ((value.TryGetValue<int>(out var number) && number == 0)
+                || (value.TryGetValue<string>(out var text) && text == "0"));
+        if (!accepted) throw new InvalidOperationException($"Pixoo rejected {command}: {code?.ToJsonString() ?? "no error_code"}");
     }
 }

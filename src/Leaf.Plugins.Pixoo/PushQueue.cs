@@ -21,6 +21,9 @@ public sealed class DevicePushQueue(IDisplaySink sink, IPushClock clock) : IAsyn
     private Task? worker;
     private DateTimeOffset? lastPush;
 
+    /// <summary>Most recent push failure, cleared by the next successful push.</summary>
+    public string? LastError { get; private set; }
+
     public void Enqueue(PixooDevice device, DisplayPush push)
     {
         push.Loop.Validate();
@@ -60,7 +63,16 @@ public sealed class DevicePushQueue(IDisplaySink sink, IPushClock clock) : IAsyn
             {
                 if (pending is { } newer) { next = newer; pending = null; }
             }
-            await sink.PushAsync(next.Device, next.Push, stopping.Token);
+            try
+            {
+                await sink.PushAsync(next.Device, next.Push, stopping.Token);
+                LastError = null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !stopping.IsCancellationRequested)
+            {
+                // A failed push must not kill the worker silently; the next state change retries.
+                LastError = $"{DateTimeOffset.UtcNow:O} {ex.GetType().Name}: {ex.Message}";
+            }
             lastPush = clock.UtcNow;
         }
     }
