@@ -25,10 +25,12 @@ public sealed class PixooPlugin : ILeafPlugin
     public void ConfigureServices(IServiceCollection services, PluginContext ctx)
     {
         services.AddSingleton<IPushClock, SystemPushClock>();
+        services.AddSingleton<IMotionGapRandom, SystemMotionGapRandom>();
         services.AddSingleton<ProceduralFaceRenderer>();
         services.AddSingleton<IAgentEventMapper, StrictAgentEventMapper>();
         services.AddSingleton<EmulatorSink>();
         services.AddSingleton(new PortraitClipSettings());
+        services.AddSingleton<MotionReplayScheduler>();
         services.AddSingleton<IVideoFrameDecoder, FfmpegVideoFrameDecoder>();
         services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(4) });
         services.AddSingleton<Pixoo64Sink>();
@@ -52,6 +54,7 @@ public sealed class PixooPlugin : ILeafPlugin
                 sp.GetRequiredService<EmulatorSink>(),
                 sp.GetRequiredService<Pixoo64Sink>(),
                 sp.GetRequiredService<IPushClock>(),
+                sp.GetRequiredService<MotionReplayScheduler>(),
                 sp.GetRequiredService<IAgentEventMapper>(),
                 portraits);
             portraits.PackReady += service.RefreshPortraitAsync;
@@ -83,7 +86,7 @@ public sealed class PixooPlugin : ILeafPlugin
         {
             id = Id,
             contract = "leaf.pixoo/1",
-            deviceModel = "64x64 RGB multi-frame loops; state-change pushes; serialized latest-wins queue",
+            deviceModel = "64x64 RGB still/motion loops; server-scheduled held motion; serialized latest-wins queue",
             hardware = "Validated on Pixoo-64 and disabled by default; explicit host only; no discovery or cloud",
             liveEvents = "identity-strict adapter present; current kernel does not expose Compute /ws frames to backend plugins",
         }));

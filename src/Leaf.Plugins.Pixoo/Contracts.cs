@@ -52,6 +52,29 @@ public sealed record FrameLoop(IReadOnlyList<RgbFrame> Frames)
     }
 }
 
+public enum DisplayPlaybackMode
+{
+    Held,
+    Continuous,
+    OneShot,
+}
+
+/// <summary>
+/// Separates the portrait that should remain on the display from an optional motion loop.
+/// Held programs are replayed by the server; continuous programs are left looping on-device.
+/// </summary>
+public sealed record DisplayProgram(FrameLoop Still, FrameLoop? Motion, DisplayPlaybackMode Mode)
+{
+    public FrameLoop InitialLoop => Mode == DisplayPlaybackMode.Held || Motion is null ? Still : Motion;
+
+    public DisplayProgram Validate()
+    {
+        Still.Validate();
+        Motion?.Validate();
+        return this;
+    }
+}
+
 public sealed record DisplayPush(FrameLoop Loop, FaceState State, FaceGesture? Gesture, string Cause, DateTimeOffset CreatedAt);
 
 public sealed record PushReceipt(DateTimeOffset PushedAt, FaceState State, FaceGesture? Gesture, string Cause, int FrameCount);

@@ -7,7 +7,7 @@ public interface IPortraitPackCache
 
 public sealed class PortraitFaceRenderer(IPortraitPackCache packs, ProceduralFaceRenderer fallback) : IFaceRenderer
 {
-    public FrameLoop Render(Guid agentId, FaceState state, string color, int brightness, FaceGesture? gesture = null)
+    public DisplayProgram Render(Guid agentId, FaceState state, string color, int brightness, FaceGesture? gesture = null)
     {
         var pack = packs.Current(agentId);
         return pack is null
@@ -18,10 +18,16 @@ public sealed class PortraitFaceRenderer(IPortraitPackCache packs, ProceduralFac
 
 public static class PortraitLoopRenderer
 {
-    public static FrameLoop Render(PortraitPack pack, FaceState state, int brightness, FaceGesture? gesture = null)
+    private static readonly HashSet<FaceState> HeldStates =
+        [FaceState.Resting, FaceState.Listening, FaceState.Thinking, FaceState.Dreaming, FaceState.Asleep];
+
+    public static DisplayProgram Render(PortraitPack pack, FaceState state, int brightness, FaceGesture? gesture = null)
     {
         if (state == FaceState.Dark)
-            return new FrameLoop([new RgbFrame(new byte[RgbFrame.ByteCount], 900)]);
+        {
+            var dark = new FrameLoop([new RgbFrame(new byte[RgbFrame.ByteCount], 900)]).Validate();
+            return new(dark, null, DisplayPlaybackMode.Held);
+        }
 
         var clipState = gesture is not null ? FaceState.Resting : state switch
         {
@@ -31,11 +37,15 @@ public static class PortraitLoopRenderer
         };
         var dim = state == FaceState.Asleep ? .35 : 1d;
         var level = Math.Clamp(brightness, 0, 100) / 100d * dim;
-        if (!pack.Clips.TryGetValue(clipState, out var clip))
-            return new FrameLoop([new RgbFrame(Scale(pack.BasePixels, level), 1000)]).Validate();
-        return new FrameLoop(clip.Loop.Frames
+        var still = new FrameLoop([new RgbFrame(Scale(pack.BasePixels, level), 1000)]).Validate();
+        if (!pack.Clips.TryGetValue(clipState, out var clip)) return new(still, null, DisplayPlaybackMode.Held);
+        var motion = new FrameLoop(clip.Loop.Frames
             .Select(frame => new RgbFrame(Scale(frame.Pixels, level), frame.DurationMs))
             .ToArray()).Validate();
+        var mode = gesture is not null
+            ? DisplayPlaybackMode.OneShot
+            : HeldStates.Contains(state) ? DisplayPlaybackMode.Held : DisplayPlaybackMode.Continuous;
+        return new DisplayProgram(still, motion, mode).Validate();
     }
 
     private static byte[] Scale(byte[] pixels, double factor)

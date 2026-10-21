@@ -16,17 +16,31 @@ public sealed record PortraitClipSettings
     public int MaximumAttemptsPerClip { get; init; } = 2;
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
-    public IReadOnlyDictionary<FaceState, int> FirstFrameHoldMs { get; init; } =
-        new Dictionary<FaceState, int>
+    public TimeSpan MotionPlaybackMargin { get; init; } = TimeSpan.FromMilliseconds(500);
+    public IReadOnlyDictionary<FaceState, MotionReplayRange> ReplayGaps { get; init; } =
+        new Dictionary<FaceState, MotionReplayRange>
         {
-            [FaceState.Resting] = 4000,
-            [FaceState.Speaking] = 133,
-            [FaceState.Listening] = 4000,
-            [FaceState.Thinking] = 4000,
-            [FaceState.Dreaming] = 4000,
+            [FaceState.Resting] = MotionReplayRange.Default,
+            [FaceState.Listening] = MotionReplayRange.Default,
+            [FaceState.Thinking] = MotionReplayRange.Default,
+            [FaceState.Dreaming] = MotionReplayRange.Default,
+            [FaceState.Asleep] = MotionReplayRange.Default,
         };
 
-    public int HoldFor(FaceState state) => FirstFrameHoldMs.GetValueOrDefault(state, FrameDurationMs);
+    public MotionReplayRange? ReplayGapFor(FaceState state)
+        => ReplayGaps.TryGetValue(state, out var range) ? range.Validate() : null;
+}
+
+public sealed record MotionReplayRange(TimeSpan Minimum, TimeSpan Maximum)
+{
+    public static MotionReplayRange Default { get; } = new(TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
+
+    public MotionReplayRange Validate()
+    {
+        if (Minimum <= TimeSpan.Zero || Maximum < Minimum)
+            throw new ArgumentOutOfRangeException(nameof(Minimum), "Motion replay gaps need a positive minimum no greater than the maximum.");
+        return this;
+    }
 }
 
 public sealed record DecodedVideoFrame(byte[] Pixels, int Width, int Height);
@@ -120,21 +134,24 @@ public sealed class FfmpegVideoFrameDecoder : IVideoFrameDecoder
 
 public static class PortraitClipProcessor
 {
-    public static FrameLoop BuildLoop(IReadOnlyList<DecodedVideoFrame> decoded, VideoPlateGeometry plate,
-        FaceState state, PortraitClipSettings settings)
+    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, VideoPlateGeometry plate,
+        PortraitClipSettings settings)
     {
         if (decoded.Count < 2) throw new InvalidDataException("A loop needs at least two video frames so the duplicate closing frame can be dropped.");
         var frames = SampleIndices(decoded.Count, settings.SampleStride, settings.MaximumLoopFrames)
-            .Select((index, position) =>
+            .Select(index =>
             {
                 var frame = decoded[index];
                 if (frame.Width != plate.OutputWidth || frame.Height != plate.OutputHeight)
                     throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {plate.OutputWidth}x{plate.OutputHeight}.");
                 var pixels = PortraitPackBuilder.BoxDownsampleRgb(frame.Pixels, frame.Width, frame.Height, plate.OutputSquare);
-                return new RgbFrame(pixels, position == 0 ? settings.HoldFor(state) : settings.FrameDurationMs);
+                return new RgbFrame(pixels, settings.FrameDurationMs);
             }).ToArray();
         return new FrameLoop(frames).Validate();
     }
+
+    public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 1000)
+        => new FrameLoop([new RgbFrame(pixels.ToArray(), durationMs)]).Validate();
 
     internal static int[] SampleIndices(int frameCount, int stride, int maximumFrames)
     {

@@ -159,7 +159,7 @@ public sealed class PortraitPackService(
                         }, token);
                     SetClip(agentId, state, "processing", attempt, generated.JobId, null);
                     var decoded = await decoder.DecodeAsync(generated.Bytes, settings.Width, settings.Height, token);
-                    var loop = PortraitClipProcessor.BuildLoop(decoded, prepared.Plate, state, settings);
+                    var loop = PortraitClipProcessor.BuildMotionLoop(decoded, prepared.Plate, settings);
                     var clip = await StoreClipAsync(source, state, prompt, seed, generated, loop, token);
                     pack = pack.WithClip(clip);
                     entityId = await StoreEntityAsync(source, prepared, pack, entityId, token);

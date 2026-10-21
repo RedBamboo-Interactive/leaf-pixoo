@@ -52,21 +52,24 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Loop_uses_per_state_first_hold_then_133ms_and_box_reduces_each_sample()
+    public void Motion_loop_uses_uniform_timing_and_still_loop_is_separate()
     {
         var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
         var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
         var settings = new PortraitClipSettings();
 
-        var resting = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Resting, settings);
-        var speaking = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Speaking, settings);
+        var motion = PortraitClipProcessor.BuildMotionLoop(decoded, plate, settings);
+        var stillPixels = Enumerable.Repeat((byte)91, RgbFrame.ByteCount).ToArray();
+        var still = PortraitClipProcessor.BuildStillLoop(stillPixels);
 
-        Assert.Equal(20, resting.Frames.Count);
-        Assert.Equal(4000, resting.Frames[0].DurationMs);
-        Assert.All(resting.Frames.Skip(1), frame => Assert.Equal(133, frame.DurationMs));
-        Assert.Equal(133, speaking.Frames[0].DurationMs);
-        Assert.All(resting.Frames[1].Pixels, value => Assert.Equal((byte)4, value));
-        Assert.All(resting.Frames[^1].Pixels, value => Assert.Equal((byte)76, value));
+        Assert.Equal(20, motion.Frames.Count);
+        Assert.All(motion.Frames, frame => Assert.Equal(133, frame.DurationMs));
+        Assert.All(motion.Frames[1].Pixels, value => Assert.Equal((byte)4, value));
+        Assert.All(motion.Frames[^1].Pixels, value => Assert.Equal((byte)76, value));
+        Assert.Single(still.Frames);
+        Assert.Equal(1000, still.Frames[0].DurationMs);
+        Assert.Equal(stillPixels, still.Frames[0].Pixels);
+        Assert.NotSame(stillPixels, still.Frames[0].Pixels);
     }
 
     [Fact]
@@ -77,7 +80,7 @@ public sealed class PortraitPipelineTests
         var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
         var settings = new PortraitClipSettings { SampleStride = 1, MaximumLoopFrames = 30 };
 
-        var loop = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Speaking, settings);
+        var loop = PortraitClipProcessor.BuildMotionLoop(decoded, plate, settings);
 
         Assert.Equal(30, loop.Frames.Count);
         Assert.All(loop.Frames[^1].Pixels, value => Assert.Equal((byte)29, value));
@@ -89,11 +92,12 @@ public sealed class PortraitPipelineTests
         var pixels = Enumerable.Repeat((byte)120, RgbFrame.ByteCount).ToArray();
         var pack = Pack(pixels);
 
-        var loop = PortraitLoopRenderer.Render(pack, FaceState.Speaking, 100);
+        var program = PortraitLoopRenderer.Render(pack, FaceState.Speaking, 100);
 
-        Assert.Single(loop.Frames);
-        Assert.Equal(pixels, loop.Frames[0].Pixels);
-        Assert.Equal(1000, loop.Frames[0].DurationMs);
+        Assert.Single(program.Still.Frames);
+        Assert.Null(program.Motion);
+        Assert.Equal(pixels, program.InitialLoop.Frames[0].Pixels);
+        Assert.Equal(1000, program.InitialLoop.Frames[0].DurationMs);
     }
 
     [Fact]
@@ -107,8 +111,11 @@ public sealed class PortraitPipelineTests
         var working = PortraitLoopRenderer.Render(pack, FaceState.Working, 100);
         var asleep = PortraitLoopRenderer.Render(pack, FaceState.Asleep, 100);
 
-        Assert.All(working.Frames[0].Pixels, value => Assert.Equal((byte)200, value));
-        Assert.All(asleep.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
+        Assert.Equal(DisplayPlaybackMode.Continuous, working.Mode);
+        Assert.All(working.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)200, value));
+        Assert.Equal(DisplayPlaybackMode.Held, asleep.Mode);
+        Assert.All(asleep.Still.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
+        Assert.All(asleep.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
     }
 
     [Fact]

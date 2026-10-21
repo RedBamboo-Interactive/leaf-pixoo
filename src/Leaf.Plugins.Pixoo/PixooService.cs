@@ -11,6 +11,7 @@ public sealed class PixooService(
     EmulatorSink emulator,
     Pixoo64Sink hardware,
     IPushClock clock,
+    MotionReplayScheduler motionReplays,
     IAgentEventMapper mapper,
     PortraitPackService portraits)
 {
@@ -47,8 +48,8 @@ public sealed class PixooService(
         var snapshot = emulator.Snapshot(device);
         if (snapshot.Frames.Count > 0) return snapshot;
         var state = states.GetOrAdd(device.Id, _ => new());
-        var loop = renderer.Render(device.AgentId, state.Current, device.AgentColor, device.Brightness, state.Gesture);
-        return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = loop.Frames };
+        var program = renderer.Render(device.AgentId, state.Current, device.AgentColor, device.Brightness, state.Gesture);
+        return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = program.InitialLoop.Frames };
     }
 
     public async Task<PixooDevice> CreateAsync(PixooCaller caller, DeviceChange request, CancellationToken ct)
@@ -125,14 +126,18 @@ public sealed class PixooService(
     {
         var machine = states.GetOrAdd(device.Id, _ => new());
         if (!machine.Apply(new(device.AgentId, state, gesture, cause)) && cause is not ("device.updated" or "portrait.pack.updated")) return;
-        var loop = renderer.Render(device.AgentId, state, device.AgentColor, device.Brightness, gesture);
+        var program = renderer.Render(device.AgentId, state, device.AgentColor, device.Brightness, gesture);
         var epoch = gestureEpochs.AddOrUpdate(device.Id, 1, (_, value) => value + 1);
         var hardwareOutput = device.Kind == DeviceKind.Pixoo64 && device.HardwareEnabled;
         if (queues.TryGetValue(device.Id, out var existing) && existing.Hardware != hardwareOutput
-            && queues.TryRemove(device.Id, out var removed)) await removed.Queue.DisposeAsync();
+            && queues.TryRemove(device.Id, out var removed))
+        {
+            motionReplays.Cancel(device.Id);
+            await removed.Queue.DisposeAsync();
+        }
         var slot = queues.GetOrAdd(device.Id, _ => new(hardwareOutput, new(hardwareOutput ? hardware : emulator, clock)));
-        slot.Queue.Enqueue(device, new(loop, state, gesture, cause, clock.UtcNow));
-        if (gesture is not null) _ = CompleteGesture(device, state, gesture.Value, epoch, loop);
+        motionReplays.Replace(device, state, gesture, cause, program, slot.Queue);
+        if (gesture is not null) _ = CompleteGesture(device, state, gesture.Value, epoch, program.InitialLoop);
     }
 
     private async Task CompleteGesture(PixooDevice device, FaceState state, FaceGesture gesture, long epoch, FrameLoop loop)

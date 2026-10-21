@@ -9,7 +9,7 @@ public interface IDisplaySink
     Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default);
 }
 
-public sealed class EmulatorSink : IDisplaySink
+public sealed class EmulatorSink(IPushClock? clock = null) : IDisplaySink
 {
     private sealed record Entry(DisplayPush Push, DateTimeOffset PushedAt);
     private readonly ConcurrentDictionary<Guid, Entry> current = new();
@@ -18,7 +18,7 @@ public sealed class EmulatorSink : IDisplaySink
     public Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
     {
         push.Loop.Validate();
-        var now = DateTimeOffset.UtcNow;
+        var now = clock?.UtcNow ?? DateTimeOffset.UtcNow;
         current[device.Id] = new(push, now);
         var queue = history.GetOrAdd(device.Id, _ => new());
         queue.Enqueue(new(now, push.State, push.Gesture, push.Cause, push.Loop.Frames.Count));
