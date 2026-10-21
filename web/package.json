@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": "22.23.1"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
     "typecheck": "tsc --noEmit",
+    "test": "node --test ../tests/release-contract.test.mjs",
     "build:pkg": "vite build",
     "test:visual": "node ../tests/visual.cjs",
     "test:device-ui": "node ../tests/device-primary.visual.cjs"

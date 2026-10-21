@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "inputType": "pixoo-extension-release-producer-input",
+  "classification": "optional",
+  "component": {
+    "id": "pixoo",
+    "kind": "extension",
+    "version": "0.1.0"
+  },
+  "redleafReleaseToolCommit": "1edfd31364f14ab283792d343a22c83041c32073",
+  "toolchain": {
+    "node": "22.23.1",
+    "pnpm": "11.0.9",
+    "dotnetSdk": "9.0.303",
+    "msbuild": "17.14.13.31314"
+  },
+  "leafSdk": {
+    "repository": "RedBamboo-Interactive/redleaf",
+    "commit": "1edfd31364f14ab283792d343a22c83041c32073",
+    "sourcePath": "src/Leaf.Sdk"
+  },
+  "redbamboo": {
+    "repository": "RedBamboo-Interactive/redbamboo-packages",
+    "commit": "f7f5d4d9fc0725a7f8d2a2696e06f20308dbae69",
+    "lockPath": "pnpm-lock.yaml",
+    "inputs": [
+      {
+        "id": "redbamboo-ui",
+        "name": "@redbamboo/ui",
+        "sourcePath": "packages/ui"
+      },
+      {
+        "id": "redbamboo-utility",
+        "name": "@redbamboo/utility",
+        "sourcePath": "packages/utility"
+      }
+    ]
+  },
+  "targetPlatform": {
+    "operatingSystem": "windows",
+    "architecture": "x64"
+  },
+  "backendProject": "src/Leaf.Plugins.Pixoo/Leaf.Plugins.Pixoo.csproj",
+  "testProject": "tests/Leaf.Plugins.Pixoo.Tests/Leaf.Plugins.Pixoo.Tests.csproj",
+  "frontendDirectory": "web",
+  "dependencies": [],
+  "runtimeRequirements": []
+}
