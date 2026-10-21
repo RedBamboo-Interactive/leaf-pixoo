@@ -2,7 +2,7 @@ import {useEffect,useState} from 'react'
 import {
   Badge,Button,Card,CardAction,CardContent,CardDescription,CardHeader,CardTitle,
   Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle,EntityCard,Input,Label,
-  PanelHeader,ScrollArea,Slider,
+  ItemList,ItemListRow,MasterDetailLayout,PanelHeader,ScrollArea,Slider,
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
@@ -21,6 +21,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   const [agents,setAgents]=useState<Agent[]>([])
   const [devices,setDevices]=useState<Device[]>([])
   const [selected,setSelected]=useState('')
+  const [mobileTab,setMobileTab]=useState(0)
   const [name,setName]=useState('')
   const [pickerMode,setPickerMode]=useState<PickerMode>('bind')
   const [agentPickerOpen,setAgentPickerOpen]=useState(false)
@@ -44,8 +45,11 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   },[])
 
   useEffect(()=>{
-    setSelected(previous=>devices.some(item=>item.id===previous)?previous:devices[0]?.id??'')
-  },[devices])
+    if(selected&&devices.some(item=>item.id===selected))return
+    const next=devices.length===1?devices[0]?.id??'':''
+    setSelected(next)
+    if(next)setMobileTab(1)
+  },[devices,selected])
 
   useEffect(()=>setName(device?.name??''),[device?.id,device?.name])
 
@@ -76,6 +80,10 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
 
   useEffect(()=>setFrame(0),[view?.state,view?.gesture,selected])
 
+  const selectDisplay=(id:string)=>{
+    setSelected(id)
+    setMobileTab(1)
+  }
 
   const act=async(state:FaceState,gesture?:FaceGesture)=>{
     if(!selected)return
@@ -121,9 +129,9 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
     }
     setBusy(true);setError('')
     try{
-      const made=await createDevice(agent.id,`Display ${devices.length+1}`)
+      const made=await createDevice(agent.id,'Display '+(devices.length+1))
       setDevices(items=>[...items.filter(item=>item.id!==made.id),made])
-      setSelected(made.id)
+      selectDisplay(made.id)
       setView(await current(made.id))
     }catch(reason){setError(message(reason))}
     finally{setBusy(false)}
@@ -131,31 +139,79 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
 
   const openCreate=()=>openPicker('create')
 
-  return <main className="min-h-full bg-background text-foreground" data-ui-surface={embedded?'pixoo-nova-section':'pixoo-emulator'}>
+  const sidebar=<section className="flex h-full min-h-0 flex-col bg-surface" aria-label="Displays">
     <PanelHeader
-      title={embedded?'Display':'Pixoo face'}
-      leading={<i className="ph-bold ph-monitor-play text-primary" aria-hidden="true"/>}
+      title="Displays"
+      leading={<i className="ph-bold ph-monitor-play text-text-muted" aria-hidden="true"/>}
     >
-      <Badge variant="outline">64 × 64</Badge>
+      <Badge variant="secondary">{devices.length}</Badge>
+      <Button size="icon-sm" variant="ghost" aria-label="Add display" disabled={busy||agents.length===0} onClick={openCreate}>
+        <i className="ph-bold ph-plus" aria-hidden="true"/>
+      </Button>
     </PanelHeader>
+    {error&&<div role="alert" className="mx-3 mt-3 rounded-md bg-destructive-a10 px-3 py-2 text-sm text-destructive">{error}</div>}
+    {loading?<div className="flex flex-1 items-center justify-center p-6 text-sm text-text-muted">Loading displays…</div>
+    :devices.length===0?<div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+      <div className="flex size-10 items-center justify-center rounded-lg bg-overlay-5 text-text-muted">
+        <i className="ph-bold ph-monitor-play text-xl" aria-hidden="true"/>
+      </div>
+      <div>
+        <p className="font-medium">No displays yet</p>
+        <p className="mt-1 max-w-52 text-sm text-text-muted">Add an emulator, then choose the Agent it should represent.</p>
+      </div>
+      <Button size="sm" disabled={busy||agents.length===0} onClick={openCreate}>
+        <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
+      </Button>
+      {agents.length===0&&<p className="text-xs text-text-muted">An Agent is required before a display can be added.</p>}
+    </div>:<>
+      <div className="px-4 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-text-muted">Configured displays</div>
+      <ItemList
+        className="min-h-0 flex-1"
+        items={devices}
+        keyFn={item=>item.id}
+        renderItem={item=>{
+          const agent=agents.find(candidate=>candidate.id===item.agentId)
+          return <ItemListRow
+            selected={item.id===selected}
+            onClick={()=>selectDisplay(item.id)}
+            icon={agent?.avatarUrl
+              ?<img src={agent.avatarUrl} alt="" className="size-full rounded-full object-cover"/>
+              :<i className="ph-bold ph-monitor-play text-text-muted" aria-hidden="true"/>}
+            title={item.name}
+            subtitle={(item.kind==='pixoo64'?'Pixoo-64':'Emulator')+' · '+(agent?.name??'Unknown Agent')}
+            trailing={<><span className="sr-only">{item.id===selected?'Selected display':'Display configured'}</span><span className={'size-2 rounded-full '+(item.id===selected?'bg-accent-teal':'bg-overlay-15')} aria-hidden="true"/></>}
+          />
+        }}
+      />
+      <div className="border-t border-border p-3">
+        <Button variant="outline" className="w-full" disabled={busy||agents.length===0} onClick={openCreate}>
+          <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
+        </Button>
+      </div>
+    </>}
+  </section>
 
-    {!loading&&devices.length===0?<div className="mx-auto max-w-xl p-4 sm:p-10">
-      <Card>
-        <CardHeader>
-          <CardTitle>No displays yet</CardTitle>
-          <CardDescription>Add an emulator, then choose the Agent it should represent. Real Pixoo-64 devices can be added later.</CardDescription>
-          <CardAction><i className="ph-bold ph-monitor-play text-xl text-text-muted" aria-hidden="true"/></CardAction>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Button onClick={openCreate} disabled={busy||agents.length===0}>
-            <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
-          </Button>
-          {agents.length===0&&<p className="text-sm text-text-muted">An Agent is required before a display can be added.</p>}
-          {error&&<p role="alert" className="text-sm text-destructive">{error}</p>}
-        </CardContent>
-      </Card>
-    </div>:devices.length>0?<div className="mx-auto grid max-w-7xl items-start gap-5 p-3 sm:p-6 lg:grid-cols-[minmax(22rem,1.35fr)_minmax(19rem,.8fr)] lg:gap-8">
-      <section className="flex min-w-0 flex-col items-center" aria-label="LED matrix emulator">
+  return <main className={(embedded?'h-full':'h-dvh')+' min-h-0 bg-background text-foreground'} data-ui-surface={embedded?'pixoo-nova-section':'pixoo-emulator'}>
+
+    <MasterDetailLayout
+      layoutKey="pixoo-displays"
+      mobileLabels={['Displays','Display']}
+      mobileTab={mobileTab}
+      onMobileTabChange={setMobileTab}
+      sidebar={sidebar}
+      detail={!device?<section className="flex h-full min-h-0 items-center justify-center bg-background p-8 text-center" aria-label="Display detail">
+        <div className="max-w-xs text-text-muted">
+          <i className="ph-bold ph-monitor-play text-3xl" aria-hidden="true"/>
+          <p className="mt-3 font-medium text-foreground">Select a display</p>
+          <p className="mt-1 text-sm">Choose a display from the list to preview and configure it.</p>
+        </div>
+      </section>:<section className="flex h-full min-h-0 flex-col bg-background" aria-label="Display detail">
+        <PanelHeader title={device.name} leading={<i className="ph-bold ph-monitor-play text-text-muted" aria-hidden="true"/>}>
+          <Badge variant={device.kind==='pixoo64'?'outline':'secondary'}>{device.kind==='pixoo64'?'Pixoo-64':'Emulator'}</Badge>
+        </PanelHeader>
+        <ScrollArea className="min-h-0 flex-1">
+    <div className="mx-auto grid w-full max-w-6xl items-start gap-4 p-3 sm:p-5 xl:grid-cols-[minmax(20rem,1.1fr)_minmax(20rem,.9fr)]">
+      <section className="flex min-w-0 flex-col items-center xl:sticky xl:top-5" aria-label="LED matrix emulator">
         <div className="pixoo-bezel">
           <LedMatrix frames={view?.frames??[]} frame={frame} label={`${view?.state??'dark'} pixel face`}/>
           <div className="pixoo-bezel-foot"><span className="pixoo-speaker"/><b>PIXOO</b><span className="pixoo-power"/></div>
@@ -168,34 +224,6 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
       </section>
 
       <aside className="flex min-w-0 flex-col gap-4" aria-label="Pixoo controls">
-        <Card size="sm">
-          <CardHeader>
-            <CardTitle>Displays</CardTitle>
-            <CardDescription>Choose a display to preview and configure.</CardDescription>
-            <CardAction><Badge variant="secondary">{devices.length}</Badge></CardAction>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-2" role="list" aria-label="Display devices">
-              {devices.map(item=>{
-                const agent=agents.find(candidate=>candidate.id===item.agentId)
-                return <EntityCard
-                  key={item.id}
-                  entity={{id:item.id,typeSlug:'pixoo-device',name:item.name}}
-                  visual={{icon:'ph-bold ph-monitor-play',color:item.agentColor}}
-                  subtitle={`${item.kind==='pixoo64'?'Pixoo-64':'Emulator'} · ${agent?.name??'Unknown Agent'}`}
-                  badge={<Badge variant={item.kind==='pixoo64'?'outline':'secondary'}>{item.kind==='pixoo64'?'hardware':'emulator'}</Badge>}
-                  variant="outlined"
-                  selected={item.id===selected}
-                  action={{kind:'button',ariaLabel:`Select ${item.name}`,onActivate:()=>setSelected(item.id)}}
-                />
-              })}
-            </div>
-            <Button variant="outline" className="w-full" disabled={busy||agents.length===0} onClick={openCreate}>
-              <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
-            </Button>
-          </CardContent>
-        </Card>
-
         <Card size="sm">
           <CardHeader>
             <CardTitle>Display settings</CardTitle>
@@ -264,9 +292,11 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
           </CardContent>
         </Card>
 
-        {error&&<Card size="sm" role="alert" className="ring-destructive-a20"><CardContent className="text-destructive">{error}</CardContent></Card>}
       </aside>
-    </div>:null}
+    </div>
+        </ScrollArea>
+      </section>}
+    />
 
     <AgentPicker open={agentPickerOpen} agents={agents} selectedId={pickerMode==='bind'?device?.agentId:undefined}
       mode={pickerMode} onOpenChange={setAgentPickerOpen} onSelect={agent=>void chooseAgent(agent)}/>

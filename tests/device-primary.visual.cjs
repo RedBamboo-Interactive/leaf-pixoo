@@ -17,19 +17,24 @@ const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs'
         await page.setViewportSize(viewport === 'desktop' ? { width: 1440, height: 1000 } : { width: 390, height: 844 });
         await page.goto(`http://127.0.0.1:4173/?harness=1&surface=nova&scenario=${scenario}&theme=dark`, { waitUntil: 'networkidle' });
         if (scenario === 'empty') await page.getByText('No displays yet', { exact: true }).waitFor();
-        else await page.getByRole('img', { name: /pixel face/ }).waitFor();
+        if (scenario === 'one') await page.getByRole('img', { name: /pixel face/ }).waitFor();
         if (scenario === 'one') await page.getByText('Bound Agent', { exact: true }).waitFor();
         if (scenario === 'two') await page.getByText('Emulator · Second Agent', { exact: true }).waitFor();
+        if (scenario === 'two' && viewport === 'desktop') await page.getByText('Select a display', { exact: true }).waitFor();
         await page.evaluate(() => window.scrollTo(0, 0));
         await page.screenshot({
           path: path.join(artifacts, `${scenario}-${viewport}.png`),
           fullPage: viewport === 'phone',
         });
         screenshots++;
+        if (scenario === 'two' && viewport === 'phone') {
+          await page.getByRole('button', { name: /Living room/ }).click();
+          await page.getByRole('img', { name: /pixel face/ }).waitFor();
+        }
         if (scenario === 'one' && viewport === 'desktop') {
           await page.getByLabel('Name').fill('Lounge display');
           await page.getByLabel('Name').press('Enter');
-          await page.getByRole('button', { name: 'Select Lounge display' }).waitFor();
+          await page.getByRole('button', { name: /Lounge display/ }).waitFor();
           await page.getByRole('button', { name: 'Change' }).click();
           await page.getByRole('button', { name: 'Select Second Agent' }).click();
           await page.getByText('Emulator · Second Agent', { exact: true }).waitFor();
