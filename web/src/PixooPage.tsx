@@ -1,4 +1,4 @@
-import {useEffect,useMemo,useState,type CSSProperties} from 'react'
+import {useEffect,useState} from 'react'
 import {
   Badge,Button,Card,CardAction,CardContent,CardDescription,CardHeader,CardTitle,
   Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle,EntityCard,Input,Label,
@@ -8,6 +8,7 @@ import {
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
 import {createDevice,current,listAgents,listDevices,portraitStatus,simulate,updateDevice} from './api'
 import type {Agent,Device,FaceGesture,FaceState,PortraitStatus,Snapshot} from './types'
+import {LedMatrix} from './LedMatrix'
 
 const states:FaceState[]=['dark','resting','listening','thinking','speaking','working','dreaming','asleep']
 type PickerMode='create'|'bind'
@@ -75,10 +76,6 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
 
   useEffect(()=>setFrame(0),[view?.state,view?.gesture,selected])
 
-  const pixels=useMemo(
-    ()=>decode(view?.frames[frame%Math.max(1,view.frames.length)]?.pixels),
-    [view,frame],
-  )
 
   const act=async(state:FaceState,gesture?:FaceGesture)=>{
     if(!selected)return
@@ -160,9 +157,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
     </div>:devices.length>0?<div className="mx-auto grid max-w-7xl items-start gap-5 p-3 sm:p-6 lg:grid-cols-[minmax(22rem,1.35fr)_minmax(19rem,.8fr)] lg:gap-8">
       <section className="flex min-w-0 flex-col items-center" aria-label="LED matrix emulator">
         <div className="pixoo-bezel">
-          <div className="pixoo-matrix" role="img" aria-label={`${view?.state??'dark'} pixel face`}>
-            {pixels.map((color,index)=><i className="pixoo-led" key={index} style={{'--led':color} as CSSProperties}/>) }
-          </div>
+          <LedMatrix frames={view?.frames??[]} frame={frame} label={`${view?.state??'dark'} pixel face`}/>
           <div className="pixoo-bezel-foot"><span className="pixoo-speaker"/><b>PIXOO</b><span className="pixoo-power"/></div>
         </div>
         <div className="mt-4 flex items-center gap-2 text-sm capitalize text-text-muted" aria-live="polite">
@@ -302,9 +297,3 @@ function AgentPicker({open,agents,selectedId,mode,onOpenChange,onSelect}:{
 
 function message(value:unknown){return value instanceof Error?value.message:String(value)}
 
-function decode(value?:string){
-  if(!value)return Array.from({length:4096},()=> 'rgb(0 0 0)')
-  const raw=atob(value),result:string[]=[]
-  for(let i=0;i<raw.length;i+=3)result.push(`rgb(${raw.charCodeAt(i)} ${raw.charCodeAt(i+1)} ${raw.charCodeAt(i+2)})`)
-  return result
-}
