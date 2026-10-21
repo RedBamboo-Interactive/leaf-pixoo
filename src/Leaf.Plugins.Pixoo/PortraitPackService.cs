@@ -22,7 +22,7 @@ public sealed record PortraitPackStatus(
 public sealed class PortraitPackService(
     IEntityStore entities,
     IAssets assets,
-    IExecutionTokens executionTokens,
+    IExecutionTokens? executionTokens,
     HttpClient http) : IPortraitPackCache, IDisposable
 {
     public const string PackEntityType = "pixoo-portrait-pack";
@@ -38,6 +38,9 @@ public sealed class PortraitPackService(
     public event Func<Guid, Task>? PackReady;
 
     public PortraitPack? Current(Guid agentId) => current.GetValueOrDefault(agentId);
+
+    private IExecutionTokens RequireExecutionTokens() => executionTokens
+        ?? throw new InvalidOperationException("Portrait generation needs the plugin execution identity (os:issue-system-execution-token permission).");
     public PortraitPackStatus Status(Guid agentId) => statuses.GetValueOrDefault(agentId)
         ?? new(agentId, "not-built", null, null, null, null, DateTimeOffset.UtcNow);
 
@@ -179,7 +182,7 @@ public sealed class PortraitPackService(
 
     private async Task<byte[]> GenerateAsync(Guid agentId, SourcePortrait source, PreparedPortrait prepared, string cropUrl, long seed, CancellationToken ct)
     {
-        var token = executionTokens.IssueSystem(new PluginSystemExecutionTokenRequest(
+        var token = RequireExecutionTokens().IssueSystem(new PluginSystemExecutionTokenRequest(
             "plugin", PixooPlugin.Id, "Leaf Pixoo", "Build the selected Agent's peripheral portrait pack",
             [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], TimeSpan.FromMinutes(15)));
         var outfitDescription = CompactDescription(source.OutfitDescription);
@@ -234,7 +237,7 @@ public sealed class PortraitPackService(
     private async Task<LandmarkResult> DetectLandmarksAsync(Guid agentId, SourcePortrait source,
         string redrawUrl, long seed, CancellationToken ct)
     {
-        var token = executionTokens.IssueSystem(new PluginSystemExecutionTokenRequest(
+        var token = RequireExecutionTokens().IssueSystem(new PluginSystemExecutionTokenRequest(
             "plugin", PixooPlugin.Id, "Leaf Pixoo", "Locate face features on the retained portrait redraw",
             [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], TimeSpan.FromMinutes(5)));
         var graph = new JsonObject

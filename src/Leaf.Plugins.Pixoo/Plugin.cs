@@ -32,8 +32,8 @@ public sealed class PixooPlugin : ILeafPlugin
         services.AddSingleton<Pixoo64Sink>();
         services.AddSingleton(sp => new PortraitPackService(
             sp.GetRequiredKeyedService<IEntityStore>(Id),
-            sp.GetRequiredKeyedService<IAssets>(Id),
-            sp.GetRequiredKeyedService<IExecutionTokens>(Id),
+            sp.GetRequiredService<IAssets>(),
+            sp.GetKeyedService<IExecutionTokens>(Id),
             new HttpClient { Timeout = TimeSpan.FromSeconds(40) }));
         services.AddSingleton<IPortraitPackCache>(sp => sp.GetRequiredService<PortraitPackService>());
         services.AddSingleton<IFaceRenderer>(sp => new PortraitFaceRenderer(
