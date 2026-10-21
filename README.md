@@ -10,7 +10,7 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - `emulator` and `pixoo64` device kinds, Agent-colour weather field, brightness, and a configurable minimum push gap (default 1000 ms).
 - Face states: `dark`, `resting`, `listening`, `thinking`, `speaking`, `working`, `dreaming`, and `asleep`.
 - One-shot gestures: `arrive` and `react`.
-- Swappable `IFaceRenderer` whose primary renderer is a cached portrait pack from the bound Agent's current Outfit image (or avatar), with a faithful deterministic reduction and finally the procedural face as fallbacks.
+- Swappable `IFaceRenderer` whose primary renderer is a cached portrait pack from the bound Agent's current Outfit image (or avatar), with faithful BOX-reduced Wan video loops, a still portrait fallback, and finally the procedural face when no portrait exists.
 - `IDisplaySink` implementations for the in-memory emulator and an explicitly disabled-by-default Pixoo-64 HTTP driver.
 - One serialized latest-wins queue per device. A push is a complete multi-frame loop; unchanged state does not push, and changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
@@ -24,15 +24,13 @@ With no device records, both surfaces show a first-run **Add display** action. O
 
 Pixoo resolves the bound Agent's current `outfit` entity and its `asset`; if either is absent it uses the Agent avatar. The source bytes are SHA-256 keyed, so a source change invalidates the cache while an unchanged image reuses its accepted pack. Outfit selection's `agent.avatar-changed` event schedules a rebuild. The bridge also subscribes to `entity.updated`, but the current kernel only broadcasts that mutation to browser WebSockets, not backend `IPluginEvents`; normal device reads therefore perform the same source-hash check as a reliable fallback.
 
-The renderer first finds a bust crop locally. It submits one `wait:false` RedCompute redraw job at a time through `qwen-image-21-reference-e1003bc3`, waits only on the returned durable job ID, and permits at most three deterministic seeds. Each candidate then gets a separate bounded RedCompute keypoint job over the full 1024×1024 redraw using the already-installed `comfyui_controlnet_aux/MediaPipe-FaceMeshPreprocessor`. The resulting feature-coloured mesh is parsed into independent eye polygons/boxes and upper/lower lip lines before any 64×64 animation is built. Missing landmarks, eyes outside the face box, or a mouth not below both eyes reject the candidate; the old proportional feature guess is never accepted.
+The renderer finds the same square bust crop used by the accepted faithful-B look and reduces it directly to 64×64 with an sRGB area/BOX average. There is no semantic redraw, colour guard, palette quantization, face-landmark job, or procedural feature editing. The Pixoo accepts 24-bit RGB, so the faithful reduction is retained without a stylistic palette limit.
 
-The default D-style reduction remains a direct sRGB area/box average of the redraw to 64×64. No palette quantization or smoothing runs by default because the Pixoo accepts 24-bit RGB and both damaged this portrait. Palette limiting (2–256 colours, non-dithered) and a mask-feathered background contrast/saturation calm-down (0–50%) remain explicit opt-ins in `PortraitReductionOptions`; both default off.
+For animation, the square crop is widened horizontally to a clamped 4:3 source rectangle, resized to a 768×576 plate, and stored as a private Leaf Asset. Pixoo submits `wait:false` jobs to `wan-22-i2v-first-last-portrait-film-60fps-4a256f5b` with the same plate as both first and last image. Each admitted job is polled by its exact durable ID and its MP4 is downloaded from `/image-gen/jobs/{id}/output`. MP4 decoding uses `ffmpeg` from `PATH`; if decoding or generation fails, that state continues to show the faithful still.
 
-The faithful B reduction is also kept as a colour reference and fallback. Hair, amber inner top, and jacket drift are measured per region. The CIELAB guard leaves an in-tolerance redraw byte-identical; only an out-of-tolerance region receives a mean-only L/a/b shift, never variance scaling. Grid pitch is recorded as provenance but does not alter the default direct box reduction. If no semantic candidate validates, the B-style source reduction becomes active. An already active pack stays on the display until its replacement passes validation; if no image can be read, the procedural face remains available.
+The workflow requests 41 source frames, interpolation multiplier 2, 30 steps, and 768×576 output. The duplicate last frame is dropped, every fourth decoded frame is retained, the square is cropped back out of the plate, and every retained frame receives the same BOX reduction to 64×64. Loops are capped at 30 frames. Default timing is 133 ms per moving frame; the configurable first-frame hold is 4000 ms for resting, listening, thinking, and dreaming, while speaking starts immediately at 133 ms.
 
-Animation is deterministic compositing over the accepted 64×64 base. A feathered figure mask limits weather and shimmer to background pixels; state brightness is a uniform whole-frame transform. The independently tilted eye boxes drive blinks and gaze. Mouth openings follow the detected line midway between the upper and lower lips: a byte-identical closed frame followed by 1 px and 2 px openings, capped at 4/6 px across with sampled lip-colour edges and a warm red-brown interior. It never asks the image model for per-frame variants, avoiding identity drift and shimmer. Each stored pack includes the crop, primary base, faithful fallback, figure mask, reduction settings, landmark detector/job provenance and polygons, native state/gesture strips, landmark/eye/mouth review sheets, and a source-versus-result comparison as Leaf Assets.
-
-As discovered on 20 October 2026, RedCompute `/discover` does not declare a standalone face-landmark capability, but its running ComfyUI provider exposes installed preprocessors through the node inventory. `DWPreprocessor` was present but returned no person for this stylized redraw. The installed MediaPipe Face Mesh preprocessor succeeded without adding custom nodes or an ONNX dependency, so Pixoo runs that node through the signed RedCompute image-job envelope and parses its deterministic mesh output. A landmark failure is terminal for that portrait candidate rather than permission to guess.
+Clips are generated in strict order: resting, speaking, listening, thinking, dreaming. Resting becomes active as soon as it is ready. Working reuses thinking, asleep reuses dreaming with uniform dimming, and arrive/react currently reuse resting. Dark remains off. Each clip gets at most two attempts with a 30-second retry cooldown and a 10-minute Agent-level failure cooldown. A per-Agent single-flight gate prevents overlapping GPU jobs. The base, 4:3 plate, source MP4s, reduced loops, prompts, seeds, exact job IDs, and provenance are stored as Leaf Assets and a `pixoo-portrait-pack` entity keyed by source hash and pipeline version. None are repository content.
 
 ## Identity and live-event boundary
 
@@ -44,16 +42,14 @@ The current RedCompute model defines `UnifiedSessionInfo.OwnerAgentId`, but prov
 
 ## Pixoo-64 status and safety
 
-The hardware path is **untested and disabled by default**. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no retries, and never contacts Divoom services.
-
-The protocol is based on unverified community descriptions:
+The hardware path is disabled by default. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no automatic retries, and never contacts Divoom services. The request sequence below was validated on a real Pixoo-64 on 21 October 2026:
 
 1. `Draw/ResetHttpGifId`
 2. one `Draw/SendHttpGif` request per 64×64 RGB frame with `PicNum`, `PicWidth=64`, `PicOffset`, `PicID`, `PicSpeed`, and base64 `PicData`
 3. `Channel/SetBrightness`
 4. `Channel/OnOffScreen`
 
-Each frame is exactly `64 × 64 × 3 = 12,288` RGB bytes before base64 encoding. Real-device timing and the interpretation/unit of `PicSpeed` must be verified on hardware before enabling it.
+Each frame is exactly `64 × 64 × 3 = 12,288` RGB bytes before base64 encoding. Requests use buffered JSON bodies with `Content-Length` because the device rejects chunked bodies while still returning HTTP 200. A non-zero `error_code` is treated as failure, recorded by the per-device queue, and does not kill the queue worker.
 
 ## Build and test
 

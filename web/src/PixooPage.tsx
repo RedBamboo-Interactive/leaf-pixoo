@@ -6,8 +6,8 @@ import {
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
-import {createDevice,current,listAgents,listDevices,simulate,updateDevice} from './api'
-import type {Agent,Device,FaceGesture,FaceState,Snapshot} from './types'
+import {createDevice,current,listAgents,listDevices,portraitStatus,simulate,updateDevice} from './api'
+import type {Agent,Device,FaceGesture,FaceState,PortraitStatus,Snapshot} from './types'
 
 const states:FaceState[]=['dark','resting','listening','thinking','speaking','working','dreaming','asleep']
 type PickerMode='create'|'bind'
@@ -24,6 +24,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   const [pickerMode,setPickerMode]=useState<PickerMode>('bind')
   const [agentPickerOpen,setAgentPickerOpen]=useState(false)
   const [view,setView]=useState<Snapshot|null>(null)
+  const [portrait,setPortrait]=useState<PortraitStatus|null>(null)
   const [frame,setFrame]=useState(0)
   const [loading,setLoading]=useState(true)
   const [busy,setBusy]=useState(false)
@@ -46,6 +47,17 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   },[devices])
 
   useEffect(()=>setName(device?.name??''),[device?.id,device?.name])
+
+  useEffect(()=>{
+    const agentId=device?.agentId
+    if(!agentId){setPortrait(null);return}
+    setPortrait(null)
+    let alive=true
+    const refresh=()=>void portraitStatus(agentId).then(value=>{if(alive)setPortrait(value)}).catch(()=>{})
+    refresh()
+    const timer=window.setInterval(refresh,5000)
+    return()=>{alive=false;window.clearInterval(timer)}
+  },[device?.agentId])
 
   useEffect(()=>{
     if(!selected){setView(null);return}
@@ -213,6 +225,13 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
                 actions={<Button variant="outline" size="sm" onClick={()=>openPicker('bind')}>Change</Button>}
               />:<Button variant="outline" className="w-full" onClick={()=>openPicker('bind')}>Choose Agent</Button>}
             </div>
+
+            {portrait&&<div className="space-y-2">
+              <div className="flex items-center justify-between gap-3"><Label>Portrait clips</Label><Badge variant="outline" className="capitalize">{portrait.state.replace('-', ' ')}</Badge></div>
+              <div className="flex flex-wrap gap-1.5" aria-label="Portrait clip generation status">
+                {portrait.clips.map(clip=><Badge key={clip.state} variant={clip.phase==='ready'?'secondary':'outline'} className="capitalize">{clip.state} · {clip.phase}</Badge>)}
+              </div>
+            </div>}
 
             {device&&<div className="space-y-3">
               <div className="flex items-center justify-between gap-3"><Label htmlFor="pixoo-brightness">Brightness</Label><output className="text-xs tabular-nums text-text-muted">{device.brightness}%</output></div>

@@ -3,60 +3,57 @@ using SkiaSharp;
 
 namespace Leaf.Plugins.Pixoo;
 
-public readonly record struct PixelRegion(int X, int Y, int Width, int Height)
+public readonly record struct ImageRect(int X, int Y, int Width, int Height)
 {
     public int Right => X + Width;
     public int Bottom => Y + Height;
-    public bool Contains(int x, int y) => x >= X && x < Right && y >= Y && y < Bottom;
-    public PixelRegion Clamp() => new(
-        Math.Clamp(X, 0, 63), Math.Clamp(Y, 0, 63),
-        Math.Clamp(Width, 1, 64 - Math.Clamp(X, 0, 63)),
-        Math.Clamp(Height, 1, 64 - Math.Clamp(Y, 0, 63)));
 }
 
-public sealed record PortraitRegions(
-    PixelRegion Face,
-    PixelRegion LeftEye,
-    PixelRegion RightEye,
-    PixelRegion Mouth,
-    PixelRegion Torso,
-    PixelRegion Subject);
+public sealed record VideoPlateGeometry(
+    ImageRect SourceSquare,
+    ImageRect SourcePlate,
+    ImageRect OutputSquare,
+    int OutputWidth = 768,
+    int OutputHeight = 576);
 
 public sealed record PortraitProvenance(
     string SourceAssetId,
     string SourceHash,
     string PipelineVersion,
+    DateTimeOffset GeneratedAt);
+
+public sealed record PortraitClipProvenance(
+    FaceState State,
     string Workflow,
     long Seed,
-    DateTimeOffset GeneratedAt,
-    int? DetectedGridPitch,
-    string? LandmarkDetector = null,
-    string? LandmarkJobId = null);
+    string JobId,
+    string VideoAssetId,
+    string LoopAssetId,
+    string Prompt,
+    string Negative,
+    DateTimeOffset GeneratedAt);
+
+public sealed record PortraitClip(FrameLoop Loop, PortraitClipProvenance Provenance);
 
 public sealed record PortraitPack(
     byte[] BasePixels,
-    byte[] FallbackPixels,
-    byte[] FigureMask,
-    PortraitRegions Regions,
     PortraitProvenance Provenance,
-    int PaletteSize,
-    double FaceContrast,
-    PortraitColorMatchMetrics ColorMatch,
-    PortraitReductionOptions? ReductionOptions = null,
-    PortraitLandmarks? Landmarks = null);
-
-public sealed record PortraitReductionOptions(int? PaletteColors = null, double BackgroundCalmAmount = 0);
-internal sealed record PortraitReductionResult(byte[] Pixels, PortraitColorMatchMetrics ColorMatch);
+    IReadOnlyDictionary<FaceState, PortraitClip> Clips)
+{
+    public PortraitPack WithClip(PortraitClip clip)
+    {
+        var next = Clips.ToDictionary(item => item.Key, item => item.Value);
+        next[clip.Provenance.State] = clip;
+        return this with { Clips = next };
+    }
+}
 
 public sealed record PreparedPortrait(
     byte[] CropPng,
-    byte[] FallbackPixels,
-    byte[] FigureMask,
-    PortraitRegions Regions,
-    string SourceHash,
-    PortraitColorHints ColorHints);
-
-public sealed record PortraitValidation(bool Valid, IReadOnlyList<string> Errors, int PaletteSize, double FaceContrast);
+    byte[] PlatePng,
+    byte[] BasePixels,
+    VideoPlateGeometry Plate,
+    string SourceHash);
 
 public static class PortraitSourceFingerprint
 {
@@ -67,88 +64,61 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const int DefaultOptionalPaletteColors = 40;
-    public const string PipelineVersion = "portrait-v4";
+    public const string PipelineVersion = "portrait-video-v1";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
         using var source = SKBitmap.Decode(sourceBytes) ?? throw new InvalidDataException("Source portrait could not be decoded.");
         var face = FindFaceWindow(source);
+        var maxSquareForPlate = Math.Min(source.Height, source.Width * 3 / 4);
+        if (maxSquareForPlate < 64) throw new InvalidDataException("Source portrait is too narrow for a 4:3 video plate.");
         var side = (int)Math.Round(Math.Max(face.Width, face.Height) * 2.12);
-        side = Math.Clamp(side, Math.Min(source.Width, source.Height) / 2, Math.Min(source.Width, source.Height));
+        side = Math.Clamp(side, Math.Min(source.Width, source.Height) / 2, maxSquareForPlate);
         var centerX = face.Left + face.Width / 2;
         var x = Math.Clamp(centerX - side / 2, 0, source.Width - side);
         var y = Math.Clamp((int)Math.Round(face.Top - face.Height * .30), 0, source.Height - side);
-        var cropRect = new SKRectI(x, y, x + side, y + side);
-        using var crop = Crop(source, cropRect);
+        var square = new ImageRect(x, y, side, side);
+        var plate = BuildPlateGeometry(square, source.Width, source.Height);
+        using var crop = Crop(source, square);
+        using var plateBitmap = CropAndResize(source, plate.SourcePlate, plate.OutputWidth, plate.OutputHeight);
         var cropPng = EncodePng(crop);
-        var fallback = BoxDownsample(crop, 64, 64);
-        var mappedFace = Map(face, cropRect);
-        var regions = RegionsFromFace(mappedFace);
-        var mask = FigureMaskBuilder.Build(regions);
-        var hints = PortraitColorMatcher.Describe(fallback, regions, mask);
-        return new(cropPng, fallback, mask, regions, PortraitSourceFingerprint.Hash(sourceBytes), hints);
+        return new(cropPng, EncodePng(plateBitmap), BoxDownsample(crop, 64, 64), plate,
+            PortraitSourceFingerprint.Hash(sourceBytes));
     }
 
-    public PortraitPack Build(byte[] redrawBytes, PreparedPortrait prepared, PortraitLandmarks landmarks,
-        string sourceAssetId, string workflow, long seed, DateTimeOffset generatedAt,
-        PortraitReductionOptions? options = null, string? landmarkJobId = null)
+    public PortraitPack BuildBase(PreparedPortrait prepared, string sourceAssetId, DateTimeOffset generatedAt)
     {
-        options ??= new PortraitReductionOptions();
-        ValidateOptions(options);
-        using var redraw = SKBitmap.Decode(redrawBytes) ?? throw new InvalidDataException("Redrawn portrait could not be decoded.");
-        var pitch = PixelGridDetector.Detect(redraw);
-        var rawPixels = BoxDownsample(redraw, 64, 64);
-        var redrawFace = Map(FindFaceWindow(redraw), new SKRectI(0, 0, redraw.Width, redraw.Height));
-        var scaffold = RegionsFromFace(redrawFace);
-        var regions = landmarks.ApplyTo(scaffold);
-        var mask = FigureMaskBuilder.Build(regions);
-        var inputColorMatch = PortraitColorMatcher.Measure(rawPixels, regions, mask,
-            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        var reduction = FinalizeReduction(rawPixels, regions, mask, prepared.FallbackPixels,
-            prepared.Regions, prepared.FigureMask, options);
-        var validation = Validate(reduction.Pixels, regions, options.PaletteColors, landmarks);
-        var colorErrors = reduction.ColorMatch.Errors().ToArray();
-        if (colorErrors.Length > 0)
-            validation = validation with { Valid = false, Errors = validation.Errors.Concat(colorErrors).ToArray() };
-        if (!validation.Valid) throw new InvalidDataException($"{string.Join("; ", validation.Errors)}; " +
-            $"guard input hair hue Δ{inputColorMatch.HairHueDelta:0.0}° L* Δ{inputColorMatch.HairLightnessDelta:0.0}, " +
-            $"inner garment hue Δ{inputColorMatch.GarmentHueDelta:0.0}° L* Δ{inputColorMatch.GarmentLightnessDelta:0.0}, " +
-            $"jacket hue Δ{inputColorMatch.JacketHueDelta:0.0}° L* Δ{inputColorMatch.JacketLightnessDelta:0.0}");
-        return new(reduction.Pixels, prepared.FallbackPixels, mask, regions,
-            new(sourceAssetId, prepared.SourceHash, PipelineVersion, workflow, seed, generatedAt, pitch,
-                landmarks.Detector, landmarkJobId),
-            validation.PaletteSize, validation.FaceContrast, reduction.ColorMatch, options, landmarks);
+        if (prepared.BasePixels.Length != RgbFrame.ByteCount)
+            throw new InvalidDataException("Faithful portrait reduction is not exactly 64x64 RGB.");
+        return new(prepared.BasePixels,
+            new(sourceAssetId, prepared.SourceHash, PipelineVersion, generatedAt),
+            new Dictionary<FaceState, PortraitClip>());
     }
 
-    public PortraitPack BuildFallback(PreparedPortrait prepared, PortraitLandmarks landmarks,
-        string sourceAssetId, DateTimeOffset generatedAt, string? landmarkJobId = null)
+    internal static VideoPlateGeometry BuildPlateGeometry(ImageRect square, int sourceWidth, int sourceHeight)
     {
-        var regions = landmarks.ApplyTo(prepared.Regions);
-        var validation = Validate(prepared.FallbackPixels, regions, landmarks: landmarks);
-        if (!validation.Valid) throw new InvalidDataException("Faithful portrait fallback failed validation: " + string.Join("; ", validation.Errors));
-        var metrics = PortraitColorMatcher.Measure(prepared.FallbackPixels, regions, prepared.FigureMask,
-            prepared.FallbackPixels, prepared.Regions, prepared.FigureMask);
-        return new(prepared.FallbackPixels, prepared.FallbackPixels, prepared.FigureMask, regions,
-            new(sourceAssetId, prepared.SourceHash, PipelineVersion, "faithful-b", 0, generatedAt, null,
-                landmarks.Detector, landmarkJobId), validation.PaletteSize, validation.FaceContrast, metrics,
-            new PortraitReductionOptions(), landmarks);
-    }
-
-    internal static PortraitReductionResult FinalizeReduction(byte[] boxPixels, PortraitRegions regions, byte[] mask,
-        byte[] reference, PortraitRegions referenceRegions, byte[] referenceMask, PortraitReductionOptions? options = null)
-    {
-        options ??= new PortraitReductionOptions();
-        ValidateOptions(options);
-        var guarded = PortraitColorMatcher.ApplyGuard(boxPixels, regions, mask, reference, referenceRegions, referenceMask);
-        var pixels = options.BackgroundCalmAmount > 0
-            ? PortraitColorMatcher.CalmBackground(guarded.Pixels, mask, options.BackgroundCalmAmount)
-            : guarded.Pixels;
-        if (options.PaletteColors is { } paletteColors)
-            pixels = PaletteQuantizer.Quantize(pixels, paletteColors);
-        var metrics = PortraitColorMatcher.Measure(pixels, regions, mask, reference, referenceRegions, referenceMask)
-            with { GuardApplied = guarded.Metrics.GuardApplied, GuardRegions = guarded.Metrics.GuardRegions };
-        return new(pixels, metrics);
+        if (square.Width != square.Height || square.Width <= 0 || square.X < 0 || square.Y < 0
+            || square.Right > sourceWidth || square.Bottom > sourceHeight)
+            throw new ArgumentOutOfRangeException(nameof(square), "The bust crop must be a square inside the source image.");
+        var plateWidth = (int)Math.Round(square.Height * 4d / 3d);
+        if (plateWidth > sourceWidth)
+            throw new InvalidDataException("The square bust crop cannot be widened to 4:3 inside the source image.");
+        var centerX = square.X + square.Width / 2d;
+        var plateX = Math.Clamp((int)Math.Round(centerX - plateWidth / 2d), 0, sourceWidth - plateWidth);
+        var sourcePlate = new ImageRect(plateX, square.Y, plateWidth, square.Height);
+        const int outputWidth = 768;
+        const int outputHeight = 576;
+        var mapped = new ImageRect(
+            (int)Math.Round((square.X - sourcePlate.X) * outputWidth / (double)sourcePlate.Width),
+            (int)Math.Round((square.Y - sourcePlate.Y) * outputHeight / (double)sourcePlate.Height),
+            (int)Math.Round(square.Width * outputWidth / (double)sourcePlate.Width),
+            (int)Math.Round(square.Height * outputHeight / (double)sourcePlate.Height));
+        mapped = new ImageRect(
+            Math.Clamp(mapped.X, 0, outputWidth - 1),
+            Math.Clamp(mapped.Y, 0, outputHeight - 1),
+            Math.Clamp(mapped.Width, 1, outputWidth - Math.Clamp(mapped.X, 0, outputWidth - 1)),
+            Math.Clamp(mapped.Height, 1, outputHeight - Math.Clamp(mapped.Y, 0, outputHeight - 1)));
+        return new(square, sourcePlate, mapped, outputWidth, outputHeight);
     }
 
     internal static byte[] BoxReduce(byte[] encodedImage)
@@ -157,39 +127,33 @@ public sealed class PortraitPackBuilder
         return BoxDownsample(source, 64, 64);
     }
 
-    public PortraitValidation Validate(byte[] pixels, PortraitRegions regions, int? paletteLimit = null,
-        PortraitLandmarks? landmarks = null, bool requireLandmarks = true)
+    internal static byte[] BoxDownsampleRgb(byte[] pixels, int width, int height, ImageRect crop,
+        int outputWidth = 64, int outputHeight = 64)
     {
-        var errors = new List<string>();
-        if (pixels.Length != RgbFrame.ByteCount) errors.Add("base frame is not exactly 64x64 RGB");
-        if (pixels.Length != RgbFrame.ByteCount) return new(false, errors, 0, 0);
-        var palette = PaletteQuantizer.CountColors(pixels);
-        if (paletteLimit is { } limit && palette > limit) errors.Add($"palette has {palette} colours (limit {limit})");
-        foreach (var (name, region) in new[] { ("face", regions.Face), ("left eye", regions.LeftEye), ("right eye", regions.RightEye), ("mouth", regions.Mouth) })
-            if (region.Width < 2 || region.Height < 2 || region.X < 0 || region.Y < 0 || region.Right > 64 || region.Bottom > 64)
-                errors.Add($"{name} region was not found");
-        if (regions.LeftEye.Height < 2 || regions.RightEye.Height < 2) errors.Add("eyes are smaller than two pixels high");
-        if (landmarks is null && requireLandmarks) errors.Add("validated face landmarks are required");
-        if (landmarks is not null)
+        if (pixels.Length != width * height * 3) throw new ArgumentException("RGB byte count does not match dimensions.", nameof(pixels));
+        if (crop.X < 0 || crop.Y < 0 || crop.Right > width || crop.Bottom > height)
+            throw new ArgumentOutOfRangeException(nameof(crop));
+        var output = new byte[outputWidth * outputHeight * 3];
+        for (var dy = 0; dy < outputHeight; dy++)
+        for (var dx = 0; dx < outputWidth; dx++)
         {
-            if (landmarks.LeftEyeOutline.Any(point => !regions.Face.Contains(point.X, point.Y))
-                || landmarks.RightEyeOutline.Any(point => !regions.Face.Contains(point.X, point.Y)))
-                errors.Add("eye landmarks are not inside the face box");
-            var leftEyeRow = landmarks.LeftEyeOutline.Average(point => point.Y);
-            var rightEyeRow = landmarks.RightEyeOutline.Average(point => point.Y);
-            var mouthRow = landmarks.LipLine.Average(point => point.Y);
-            if (mouthRow <= Math.Max(leftEyeRow, rightEyeRow))
-                errors.Add("mouth landmark is not below both eyes");
+            var x0 = crop.X + dx * crop.Width / outputWidth;
+            var x1 = crop.X + Math.Max(dx * crop.Width / outputWidth + 1, (dx + 1) * crop.Width / outputWidth);
+            var y0 = crop.Y + dy * crop.Height / outputHeight;
+            var y1 = crop.Y + Math.Max(dy * crop.Height / outputHeight + 1, (dy + 1) * crop.Height / outputHeight);
+            long red = 0, green = 0, blue = 0, count = 0;
+            for (var sy = y0; sy < y1; sy++)
+            for (var sx = x0; sx < x1; sx++)
+            {
+                var index = (sy * width + sx) * 3;
+                red += pixels[index]; green += pixels[index + 1]; blue += pixels[index + 2]; count++;
+            }
+            var target = (dy * outputWidth + dx) * 3;
+            output[target] = (byte)((red + count / 2) / count);
+            output[target + 1] = (byte)((green + count / 2) / count);
+            output[target + 2] = (byte)((blue + count / 2) / count);
         }
-        var faceContrast = Contrast(pixels, regions.Face);
-        if (faceContrast < 24) errors.Add($"face contrast is too low ({faceContrast:0.0})");
-        var leftEyeContrast = Contrast(pixels, regions.LeftEye);
-        var rightEyeContrast = Contrast(pixels, regions.RightEye);
-        if (leftEyeContrast < 7 || rightEyeContrast < 7)
-            errors.Add($"eye regions have insufficient contrast (left {leftEyeContrast:0.0} at {regions.LeftEye}, right {rightEyeContrast:0.0} at {regions.RightEye}, face {regions.Face})");
-        var mouthContrast = Contrast(pixels, regions.Mouth);
-        if (mouthContrast < 7) errors.Add($"mouth region has insufficient contrast ({mouthContrast:0.0})");
-        return new(errors.Count == 0, errors, palette, faceContrast);
+        return output;
     }
 
     public static byte[] EncodePng(byte[] rgb, int width = 64, int height = 64)
@@ -199,8 +163,8 @@ public sealed class PortraitPackBuilder
         for (var y = 0; y < height; y++)
         for (var x = 0; x < width; x++)
         {
-            var i = (y * width + x) * 3;
-            bitmap.SetPixel(x, y, new SKColor(rgb[i], rgb[i + 1], rgb[i + 2]));
+            var index = (y * width + x) * 3;
+            bitmap.SetPixel(x, y, new SKColor(rgb[index], rgb[index + 1], rgb[index + 2]));
         }
         return EncodePng(bitmap);
     }
@@ -212,30 +176,6 @@ public sealed class PortraitPackBuilder
         return ToRgb(image);
     }
 
-    public static byte[] EncodeMaskPng(byte[] mask)
-    {
-        if (mask.Length != 64 * 64) throw new ArgumentException("Figure mask must be exactly 64x64.", nameof(mask));
-        var rgb = new byte[RgbFrame.ByteCount];
-        for (var i = 0; i < mask.Length; i++) rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = mask[i];
-        return EncodePng(rgb);
-    }
-
-    public static byte[] DecodeMaskPng(byte[] png)
-    {
-        var rgb = DecodePng(png);
-        var mask = new byte[64 * 64];
-        for (var i = 0; i < mask.Length; i++) mask[i] = rgb[i * 3];
-        return mask;
-    }
-
-    private static void ValidateOptions(PortraitReductionOptions options)
-    {
-        if (options.PaletteColors is < 2 or > 256)
-            throw new ArgumentOutOfRangeException(nameof(options), "PaletteColors must be between 2 and 256 when enabled.");
-        if (options.BackgroundCalmAmount is < 0 or > .5)
-            throw new ArgumentOutOfRangeException(nameof(options), "BackgroundCalmAmount must be between 0 and 0.5.");
-    }
-
     private static byte[] ToRgb(SKBitmap image)
     {
         var result = new byte[image.Width * image.Height * 3];
@@ -243,11 +183,11 @@ public sealed class PortraitPackBuilder
         for (var x = 0; x < image.Width; x++)
         {
             var pixel = image.GetPixel(x, y);
-            var i = (y * image.Width + x) * 3;
+            var index = (y * image.Width + x) * 3;
             var alpha = pixel.Alpha / 255d;
-            result[i] = (byte)Math.Round(pixel.Red * alpha);
-            result[i + 1] = (byte)Math.Round(pixel.Green * alpha);
-            result[i + 2] = (byte)Math.Round(pixel.Blue * alpha);
+            result[index] = (byte)Math.Round(pixel.Red * alpha);
+            result[index + 1] = (byte)Math.Round(pixel.Green * alpha);
+            result[index + 2] = (byte)Math.Round(pixel.Blue * alpha);
         }
         return result;
     }
@@ -300,12 +240,12 @@ public sealed class PortraitPackBuilder
         return new SKRectI(resultX, resultY, resultX + resultWidth, resultY + resultHeight);
     }
 
-    private static bool IsSkin(SKColor p)
+    private static bool IsSkin(SKColor pixel)
     {
-        var r = p.Red; var g = p.Green; var b = p.Blue;
-        var cb = 128 - .168736 * r - .331264 * g + .5 * b;
-        var cr = 128 + .5 * r - .418688 * g - .081312 * b;
-        return r > 55 && Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b)) > 10
+        var red = pixel.Red; var green = pixel.Green; var blue = pixel.Blue;
+        var cb = 128 - .168736 * red - .331264 * green + .5 * blue;
+        var cr = 128 + .5 * red - .418688 * green - .081312 * blue;
+        return red > 55 && Math.Max(red, Math.Max(green, blue)) - Math.Min(red, Math.Min(green, blue)) > 10
             && cb is >= 72 and <= 138 && cr is >= 128 and <= 182;
     }
 
@@ -313,168 +253,24 @@ public sealed class PortraitPackBuilder
         => integral[(y + height) * stride + x + width] - integral[y * stride + x + width]
            - integral[(y + height) * stride + x] + integral[y * stride + x];
 
-    private static PixelRegion Map(SKRectI face, SKRectI crop)
-    {
-        var scale = 64d / crop.Width;
-        return new PixelRegion(
-            (int)Math.Round((face.Left - crop.Left) * scale), (int)Math.Round((face.Top - crop.Top) * scale),
-            Math.Max(8, (int)Math.Round(face.Width * scale)), Math.Max(10, (int)Math.Round(face.Height * scale))).Clamp();
-    }
-
-    private static SKBitmap Crop(SKBitmap source, SKRectI rect)
+    private static SKBitmap Crop(SKBitmap source, ImageRect rect)
     {
         var output = new SKBitmap(rect.Width, rect.Height, SKColorType.Rgba8888, SKAlphaType.Opaque);
         using var canvas = new SKCanvas(output);
-        canvas.DrawBitmap(source, rect, new SKRect(0, 0, rect.Width, rect.Height));
+        canvas.DrawBitmap(source, new SKRectI(rect.X, rect.Y, rect.Right, rect.Bottom), new SKRect(0, 0, rect.Width, rect.Height));
+        canvas.Flush();
+        return output;
+    }
+
+    private static SKBitmap CropAndResize(SKBitmap source, ImageRect rect, int width, int height)
+    {
+        var output = new SKBitmap(width, height, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        using var canvas = new SKCanvas(output);
+        canvas.DrawBitmap(source, new SKRect(rect.X, rect.Y, rect.Right, rect.Bottom), new SKRect(0, 0, width, height));
         canvas.Flush();
         return output;
     }
 
     private static byte[] BoxDownsample(SKBitmap source, int width, int height)
-    {
-        var output = new byte[width * height * 3];
-        for (var dy = 0; dy < height; dy++)
-        for (var dx = 0; dx < width; dx++)
-        {
-            var x0 = dx * source.Width / width;
-            var x1 = Math.Max(x0 + 1, (dx + 1) * source.Width / width);
-            var y0 = dy * source.Height / height;
-            var y1 = Math.Max(y0 + 1, (dy + 1) * source.Height / height);
-            long r = 0, g = 0, b = 0, count = 0;
-            for (var sy = y0; sy < y1; sy++)
-            for (var sx = x0; sx < x1; sx++)
-            {
-                var pixel = source.GetPixel(sx, sy);
-                r += pixel.Red; g += pixel.Green; b += pixel.Blue; count++;
-            }
-            var i = (dy * width + dx) * 3;
-            output[i] = (byte)((r + count / 2) / count);
-            output[i + 1] = (byte)((g + count / 2) / count);
-            output[i + 2] = (byte)((b + count / 2) / count);
-        }
-        return output;
-    }
-
-    private static PortraitRegions RegionsFromFace(PixelRegion face)
-    {
-        PixelRegion Rel(double x, double y, double w, double h) => new PixelRegion(
-            face.X + (int)Math.Round(face.Width * x), face.Y + (int)Math.Round(face.Height * y),
-            Math.Max(2, (int)Math.Round(face.Width * w)), Math.Max(2, (int)Math.Round(face.Height * h))).Clamp();
-        var subjectX = Math.Max(0, face.X - face.Width / 2);
-        var subjectWidth = Math.Min(64 - subjectX, face.Width * 2);
-        var subject = new PixelRegion(subjectX, Math.Max(0, face.Y - face.Height / 4), subjectWidth, 64 - Math.Max(0, face.Y - face.Height / 4)).Clamp();
-        return new PortraitRegions(face, Rel(.18, .34, .34, .18), Rel(.56, .34, .34, .18), Rel(.28, .65, .44, .22),
-            new PixelRegion(subject.X, Math.Min(63, face.Bottom - 2), subject.Width, Math.Max(1, 64 - Math.Min(63, face.Bottom - 2))).Clamp(), subject);
-    }
-
-    private static double Contrast(byte[] pixels, PixelRegion region)
-    {
-        var min = 255d; var max = 0d;
-        for (var y = region.Y; y < region.Bottom; y++)
-        for (var x = region.X; x < region.Right; x++)
-        {
-            var i = (y * 64 + x) * 3;
-            var l = .2126 * pixels[i] + .7152 * pixels[i + 1] + .0722 * pixels[i + 2];
-            min = Math.Min(min, l); max = Math.Max(max, l);
-        }
-        return max - min;
-    }
-}
-
-public static class PixelGridDetector
-{
-    public static int? Detect(SKBitmap image)
-    {
-        if (image.Width < 64 || image.Height < 64) return null;
-        var best = (Pitch: 0, Score: 0d);
-        var maxPitch = Math.Min(32, Math.Min(image.Width, image.Height) / 4);
-        for (var pitch = 2; pitch <= maxPitch; pitch++)
-        {
-            if (image.Width % pitch != 0 || image.Height % pitch != 0) continue;
-            double boundary = 0, total = 0;
-            for (var y = 0; y < image.Height; y += 2)
-            {
-                for (var x = 1; x < image.Width; x++)
-                {
-                    var e = Distance(image.GetPixel(x - 1, y), image.GetPixel(x, y)); total += e;
-                    if (x % pitch == 0) boundary += e;
-                }
-            }
-            if (total <= 0) continue;
-            var share = boundary / total;
-            var expected = 1d / pitch;
-            var score = (share - expected) / Math.Max(.001, 1 - expected);
-            // Divisors of the true grid pitch see the same boundaries. Prefer the
-            // largest pitch at an equal score so an 8 px grid is not reported as 2.
-            if (score > best.Score + .0001 || (Math.Abs(score - best.Score) <= .0001 && pitch > best.Pitch))
-                best = (pitch, score);
-        }
-        return best.Score >= .42 ? best.Pitch : null;
-    }
-
-    private static double Distance(SKColor a, SKColor b)
-        => Math.Abs(a.Red - b.Red) + Math.Abs(a.Green - b.Green) + Math.Abs(a.Blue - b.Blue);
-}
-
-public static class PaletteQuantizer
-{
-    private sealed record Entry(byte R, byte G, byte B, int Count);
-    private sealed class Box(List<Entry> entries)
-    {
-        public List<Entry> Entries { get; } = entries;
-        public int Count => Entries.Sum(item => item.Count);
-        public int Range => Math.Max(Entries.Max(x => x.R) - Entries.Min(x => x.R),
-            Math.Max(Entries.Max(x => x.G) - Entries.Min(x => x.G), Entries.Max(x => x.B) - Entries.Min(x => x.B)));
-    }
-
-    public static byte[] Quantize(byte[] rgb, int maxColors)
-    {
-        if (rgb.Length % 3 != 0) throw new ArgumentException("RGB data must contain complete pixels.");
-        if (maxColors is < 2 or > 256) throw new ArgumentOutOfRangeException(nameof(maxColors));
-        var histogram = new Dictionary<int, int>();
-        for (var i = 0; i < rgb.Length; i += 3)
-        {
-            var key = rgb[i] << 16 | rgb[i + 1] << 8 | rgb[i + 2];
-            histogram[key] = histogram.GetValueOrDefault(key) + 1;
-        }
-        if (histogram.Count <= maxColors) return rgb.ToArray();
-        var boxes = new List<Box> { new(histogram.Select(pair => new Entry((byte)(pair.Key >> 16), (byte)(pair.Key >> 8), (byte)pair.Key, pair.Value)).ToList()) };
-        while (boxes.Count < maxColors)
-        {
-            var box = boxes.Where(item => item.Entries.Count > 1).OrderByDescending(item => item.Range * (long)item.Count).FirstOrDefault();
-            if (box is null) break;
-            boxes.Remove(box);
-            var rRange = box.Entries.Max(x => x.R) - box.Entries.Min(x => x.R);
-            var gRange = box.Entries.Max(x => x.G) - box.Entries.Min(x => x.G);
-            var bRange = box.Entries.Max(x => x.B) - box.Entries.Min(x => x.B);
-            var ordered = (rRange >= gRange && rRange >= bRange ? box.Entries.OrderBy(x => x.R)
-                : gRange >= bRange ? box.Entries.OrderBy(x => x.G) : box.Entries.OrderBy(x => x.B)).ToList();
-            var half = box.Count / 2; var running = 0; var split = 1;
-            for (; split < ordered.Count; split++) { running += ordered[split - 1].Count; if (running >= half) break; }
-            boxes.Add(new(ordered[..split])); boxes.Add(new(ordered[split..]));
-        }
-        var palette = boxes.Select(box =>
-        {
-            var count = Math.Max(1, box.Count);
-            return ((byte)(box.Entries.Sum(x => x.R * (long)x.Count) / count),
-                (byte)(box.Entries.Sum(x => x.G * (long)x.Count) / count),
-                (byte)(box.Entries.Sum(x => x.B * (long)x.Count) / count));
-        }).ToArray();
-        var output = new byte[rgb.Length];
-        for (var i = 0; i < rgb.Length; i += 3)
-        {
-            var best = palette.MinBy(c => Square(rgb[i] - c.Item1) + Square(rgb[i + 1] - c.Item2) + Square(rgb[i + 2] - c.Item3));
-            output[i] = best.Item1; output[i + 1] = best.Item2; output[i + 2] = best.Item3;
-        }
-        return output;
-    }
-
-    public static int CountColors(byte[] rgb)
-    {
-        var colors = new HashSet<int>();
-        for (var i = 0; i + 2 < rgb.Length; i += 3) colors.Add(rgb[i] << 16 | rgb[i + 1] << 8 | rgb[i + 2]);
-        return colors.Count;
-    }
-
-    private static int Square(int value) => value * value;
+        => BoxDownsampleRgb(ToRgb(source), source.Width, source.Height, new(0, 0, source.Width, source.Height), width, height);
 }

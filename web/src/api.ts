@@ -1,4 +1,4 @@
-import type {Agent,Device,FaceGesture,FaceState,Frame,Snapshot} from './types'
+import type {Agent,Device,FaceGesture,FaceState,Frame,PortraitStatus,Snapshot} from './types'
 
 declare const __PIXOO_HAS_LOCAL_PREVIEW__:boolean
 
@@ -24,6 +24,10 @@ async function json<T>(path:string,init?:RequestInit):Promise<T>{
 }
 export async function listAgents(){return harness?agents:json<Agent[]>('/agents')}
 export async function listDevices(){return harness?devices:json<Device[]>('/devices')}
+export async function portraitStatus(agentId:string){
+  if(!harness)return json<PortraitStatus>(`/portrait/status?agentId=${encodeURIComponent(agentId)}`)
+  return {agentId,state:'ready',updatedAt:new Date().toISOString(),clips:(['resting','speaking','listening','thinking','dreaming'] as FaceState[]).map(state=>({state,phase:'ready',attempts:1,updatedAt:new Date().toISOString()}))}
+}
 export async function current(deviceId:string){
   if(!harness)return json<Snapshot>(`/emulator?deviceId=${encodeURIComponent(deviceId)}`)
   await loadPreview()

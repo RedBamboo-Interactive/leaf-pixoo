@@ -18,7 +18,7 @@
       "icon": "ph-image-square",
       "color": "violet",
       "versioning": true,
-      "description": "A validated 64x64 portrait base, faithful fallback and provenance for one Agent source image."
+      "description": "A faithful 64x64 Outfit portrait plus Wan state clips and provenance stored as Leaf Assets."
     }
   }
 ]

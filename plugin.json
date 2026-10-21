@@ -35,9 +35,9 @@
     ]
   },
   "permissions": [
-    { "kind": "os", "target": "issue-system-execution-token", "reason": "Issue short-lived, purpose-scoped plugin identities for bounded portrait redraw and face-landmark jobs" },
-    { "kind": "net", "target": "127.0.0.1:18804", "reason": "Submit bounded portrait redraws to the installed reference workflow using a plugin-scoped signed execution identity" },
-    { "kind": "net", "target": "127.0.0.1:18800", "reason": "Submit the installed face-mesh preprocessor and wait on/download exact admitted RedCompute portrait and landmark jobs" },
-    { "kind": "net", "target": "configured-pixoo-host", "reason": "Optional untested local HTTP control of an explicitly configured Pixoo-64; disabled by default" }
+    { "kind": "os", "target": "issue-system-execution-token", "reason": "Issue short-lived, purpose-scoped plugin identities for bounded Agent portrait video jobs" },
+    { "kind": "net", "target": "127.0.0.1:18804", "reason": "Upload the private 4:3 portrait plate and submit bounded Wan image-to-video jobs with signed execution identity" },
+    { "kind": "net", "target": "127.0.0.1:18800", "reason": "Poll exact admitted RedCompute jobs and download their generated MP4 output" },
+    { "kind": "net", "target": "configured-pixoo-host", "reason": "Optional local HTTP control of an explicitly configured Pixoo-64; disabled by default" }
   ]
 }

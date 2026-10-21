@@ -28,13 +28,17 @@ public sealed class PixooPlugin : ILeafPlugin
         services.AddSingleton<ProceduralFaceRenderer>();
         services.AddSingleton<IAgentEventMapper, StrictAgentEventMapper>();
         services.AddSingleton<EmulatorSink>();
+        services.AddSingleton(new PortraitClipSettings());
+        services.AddSingleton<IVideoFrameDecoder, FfmpegVideoFrameDecoder>();
         services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(4) });
         services.AddSingleton<Pixoo64Sink>();
         services.AddSingleton(sp => new PortraitPackService(
             sp.GetRequiredKeyedService<IEntityStore>(Id),
             sp.GetRequiredService<IAssets>(),
             sp.GetKeyedService<IExecutionTokens>(Id),
-            new HttpClient { Timeout = TimeSpan.FromSeconds(40) }));
+            new HttpClient { Timeout = TimeSpan.FromSeconds(40) },
+            sp.GetRequiredService<IVideoFrameDecoder>(),
+            sp.GetRequiredService<PortraitClipSettings>()));
         services.AddSingleton<IPortraitPackCache>(sp => sp.GetRequiredService<PortraitPackService>());
         services.AddSingleton<IFaceRenderer>(sp => new PortraitFaceRenderer(
             sp.GetRequiredService<IPortraitPackCache>(),
@@ -80,7 +84,7 @@ public sealed class PixooPlugin : ILeafPlugin
             id = Id,
             contract = "leaf.pixoo/1",
             deviceModel = "64x64 RGB multi-frame loops; state-change pushes; serialized latest-wins queue",
-            hardware = "UNTESTED and disabled by default; explicit host only; no discovery or cloud",
+            hardware = "Validated on Pixoo-64 and disabled by default; explicit host only; no discovery or cloud",
             liveEvents = "identity-strict adapter present; current kernel does not expose Compute /ws frames to backend plugins",
         }));
         group.MapGet("/agents", async (HttpContext context, PixooService service, CancellationToken ct) => Results.Ok(await service.AgentsAsync(PixooCaller.From(context.User), ct)));
@@ -101,6 +105,8 @@ public sealed class PixooPlugin : ILeafPlugin
             var request = await Read<PortraitRebuildRequest>(context, ct);
             return Results.Ok(await service.RebuildPortraitAsync(PixooCaller.From(context.User), request.AgentId, request.Force, ct));
         });
+        group.MapGet("/portrait/status", async (Guid agentId, HttpContext context, PixooService service, CancellationToken ct) =>
+            Results.Ok(await service.PortraitStatusAsync(PixooCaller.From(context.User), agentId, ct)));
     }
 
     private static async Task<T> Read<T>(HttpContext context, CancellationToken ct)

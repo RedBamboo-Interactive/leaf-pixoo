@@ -5,436 +5,211 @@ namespace Leaf.Plugins.Pixoo.Tests;
 public sealed class PortraitPipelineTests
 {
     [Fact]
-    public void Grid_detector_finds_regular_pixel_pitch()
+    public void Faithful_base_is_byte_identical_to_box_reduction_of_the_square_crop()
     {
-        using var bitmap = new SKBitmap(128, 128, SKColorType.Rgba8888, SKAlphaType.Opaque);
-        for (var y = 0; y < bitmap.Height; y++)
-        for (var x = 0; x < bitmap.Width; x++)
+        var prepared = new PortraitPackBuilder().Prepare(SyntheticPortrait());
+
+        var expected = PortraitPackBuilder.BoxReduce(prepared.CropPng);
+
+        Assert.Equal(expected, prepared.BasePixels);
+        Assert.Equal(RgbFrame.ByteCount, prepared.BasePixels.Length);
+        using var plate = SKBitmap.Decode(prepared.PlatePng);
+        Assert.Equal(768, plate.Width);
+        Assert.Equal(576, plate.Height);
+    }
+
+    [Fact]
+    public void Plate_widens_square_to_four_by_three_and_maps_square_back_to_video_space()
+    {
+        var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
+
+        Assert.Equal(new ImageRect(150, 100, 400, 300), plate.SourcePlate);
+        Assert.Equal(new ImageRect(96, 0, 576, 576), plate.OutputSquare);
+        Assert.Equal(768, plate.OutputWidth);
+        Assert.Equal(576, plate.OutputHeight);
+    }
+
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(700, 600)]
+    public void Plate_clamps_at_source_edges_without_moving_the_square(int squareX, int expectedPlateX)
+    {
+        var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(squareX, 80, 300, 300), 1000, 800);
+
+        Assert.Equal(expectedPlateX, plate.SourcePlate.X);
+        var expectedOutputX = squareX == 0 ? 0 : 192;
+        Assert.Equal(new ImageRect(expectedOutputX, 0, 576, 576), plate.OutputSquare);
+    }
+
+    [Fact]
+    public void Sampling_drops_duplicate_last_frame_and_takes_every_fourth()
+    {
+        var selected = PortraitClipProcessor.SampleIndices(81, 4, 30);
+
+        Assert.Equal(20, selected.Length);
+        Assert.Equal(Enumerable.Range(0, 20).Select(value => value * 4), selected);
+        Assert.DoesNotContain(80, selected);
+    }
+
+    [Fact]
+    public void Loop_uses_per_state_first_hold_then_133ms_and_box_reduces_each_sample()
+    {
+        var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
+        var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
+        var settings = new PortraitClipSettings();
+
+        var resting = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Resting, settings);
+        var speaking = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Speaking, settings);
+
+        Assert.Equal(20, resting.Frames.Count);
+        Assert.Equal(4000, resting.Frames[0].DurationMs);
+        Assert.All(resting.Frames.Skip(1), frame => Assert.Equal(133, frame.DurationMs));
+        Assert.Equal(133, speaking.Frames[0].DurationMs);
+        Assert.All(resting.Frames[1].Pixels, value => Assert.Equal((byte)4, value));
+        Assert.All(resting.Frames[^1].Pixels, value => Assert.Equal((byte)76, value));
+    }
+
+    [Fact]
+    public void Loop_never_exceeds_thirty_frames()
+    {
+        var plate = new VideoPlateGeometry(new(0, 0, 576, 576), new(0, 0, 768, 576),
+            new(0, 0, 576, 576));
+        var decoded = Enumerable.Range(0, 81).Select(VideoFrame).ToArray();
+        var settings = new PortraitClipSettings { SampleStride = 1, MaximumLoopFrames = 30 };
+
+        var loop = PortraitClipProcessor.BuildLoop(decoded, plate, FaceState.Speaking, settings);
+
+        Assert.Equal(30, loop.Frames.Count);
+        Assert.All(loop.Frames[^1].Pixels, value => Assert.Equal((byte)29, value));
+    }
+
+    [Fact]
+    public void Missing_or_failed_clip_falls_back_to_unchanged_still_portrait()
+    {
+        var pixels = Enumerable.Repeat((byte)120, RgbFrame.ByteCount).ToArray();
+        var pack = Pack(pixels);
+
+        var loop = PortraitLoopRenderer.Render(pack, FaceState.Speaking, 100);
+
+        Assert.Single(loop.Frames);
+        Assert.Equal(pixels, loop.Frames[0].Pixels);
+        Assert.Equal(1000, loop.Frames[0].DurationMs);
+    }
+
+    [Fact]
+    public void Working_reuses_thinking_and_asleep_reuses_dimmed_dreaming()
+    {
+        var pixels = Enumerable.Repeat((byte)200, RgbFrame.ByteCount).ToArray();
+        var thinking = Clip(FaceState.Thinking, pixels);
+        var dreaming = Clip(FaceState.Dreaming, pixels);
+        var pack = Pack(pixels, thinking, dreaming);
+
+        var working = PortraitLoopRenderer.Render(pack, FaceState.Working, 100);
+        var asleep = PortraitLoopRenderer.Render(pack, FaceState.Asleep, 100);
+
+        Assert.All(working.Frames[0].Pixels, value => Assert.Equal((byte)200, value));
+        Assert.All(asleep.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
+    }
+
+    [Fact]
+    public async Task Generation_is_ordered_and_bounded_to_two_attempts_per_clip()
+    {
+        var calls = new List<(FaceState State, int Attempt)>();
+        var settings = new PortraitClipSettings { RetryCooldown = TimeSpan.Zero };
+
+        await PortraitClipPlan.ExecuteAsync((state, attempt, _) =>
         {
-            var cellX = x / 8;
-            var cellY = y / 8;
-            bitmap.SetPixel(x, y, new SKColor(
-                (byte)((cellX * 47 + cellY * 11) % 256),
-                (byte)((cellX * 19 + cellY * 53) % 256),
-                (byte)((cellX * 71 + cellY * 29) % 256)));
+            calls.Add((state, attempt));
+            return Task.FromResult(state != FaceState.Speaking);
+        }, settings, CancellationToken.None);
+
+        Assert.Equal([
+            (FaceState.Resting, 1),
+            (FaceState.Speaking, 1), (FaceState.Speaking, 2),
+            (FaceState.Listening, 1),
+            (FaceState.Thinking, 1),
+            (FaceState.Dreaming, 1),
+        ], calls);
+    }
+
+    [Fact]
+    public async Task Builds_are_single_flight_per_agent()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var singleFlight = new AgentSingleFlight<int>();
+        var agentId = Guid.NewGuid();
+        async Task<int> Build()
+        {
+            Interlocked.Increment(ref calls);
+            started.SetResult();
+            await gate.Task;
+            return 42;
         }
 
-        Assert.Equal(8, PixelGridDetector.Detect(bitmap));
+        var first = singleFlight.RunAsync(agentId, Build);
+        await started.Task;
+        var second = singleFlight.RunAsync(agentId, Build);
+        gate.SetResult();
+
+        Assert.Equal(42, await first);
+        Assert.Equal(42, await second);
+        Assert.Equal(1, calls);
     }
 
     [Fact]
-    public void Synthetic_portrait_regions_match_known_landmarks_and_validate_geometry()
+    public void Prompts_are_state_specific_and_only_add_the_supplied_scene_description()
     {
-        var landmarks = SyntheticLandmarks();
-        var scaffold = SyntheticScaffold();
-        var regions = landmarks.ApplyTo(scaffold);
-        var basePixels = SyntheticPortrait(landmarks);
-        var validation = new PortraitPackBuilder().Validate(basePixels, regions, landmarks: landmarks);
+        const string description = "amber knit top, blue denim jacket, library alcove";
 
-        AssertRegionNear(new PixelRegion(18, 19, 10, 9), regions.LeftEye);
-        AssertRegionNear(new PixelRegion(33, 17, 11, 9), regions.RightEye);
-        AssertRegionNear(new PixelRegion(26, 30, 11, 6), regions.Mouth);
-        var mouthRow = landmarks.LipLine.Average(point => point.Y);
-        Assert.True(mouthRow > landmarks.LeftEyeOutline.Average(point => point.Y));
-        Assert.True(mouthRow > landmarks.RightEyeOutline.Average(point => point.Y));
-        Assert.True(validation.Valid, string.Join("; ", validation.Errors));
+        var resting = PortraitClipPrompts.For(FaceState.Resting, description);
+        var speaking = PortraitClipPrompts.For(FaceState.Speaking, description);
+
+        Assert.Contains(description, resting.Prompt);
+        Assert.Contains("one natural blink", resting.Prompt);
+        Assert.Contains("conversational lip and jaw movement", speaking.Prompt);
+        Assert.DoesNotContain("rain", resting.Prompt, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("woman", resting.Prompt, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Validation_rejects_landmarks_outside_the_face_or_mouth_above_the_eyes()
-    {
-        var valid = SyntheticLandmarks();
-        var scaffold = SyntheticScaffold();
-        var invalid = valid with
-        {
-            LeftEyeOutline = [new(2, 2), new(4, 2), new(4, 4), new(2, 4)],
-            UpperLip = valid.UpperLip.Select(point => point with { Y = 10 }).ToArray(),
-            LowerLip = valid.LowerLip.Select(point => point with { Y = 11 }).ToArray(),
-        };
-        var regions = invalid.ApplyTo(scaffold);
-        var validation = new PortraitPackBuilder().Validate(
-            SyntheticPortrait(valid), regions, landmarks: invalid);
-
-        Assert.False(validation.Valid);
-        Assert.Contains(validation.Errors, error => error.Contains("inside the face", StringComparison.Ordinal));
-        Assert.Contains(validation.Errors, error => error.Contains("below both eyes", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void Missing_face_mesh_fails_instead_of_guessing_regions()
-    {
-        using var blank = new SKBitmap(1024, 1024, SKColorType.Rgba8888, SKAlphaType.Opaque);
-        blank.Erase(SKColors.Black);
-        using var image = SKImage.FromBitmap(blank);
-        using var png = image.Encode(SKEncodedImageFormat.Png, 100);
-
-        var error = Assert.Throws<InvalidDataException>(() => FaceMeshLandmarkDetector.Detect(png.ToArray()));
-
-        Assert.Contains("not found", error.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void Quantization_is_deterministic_and_bounded_without_dithering()
-    {
-        var pixels = new byte[RgbFrame.ByteCount];
-        for (var i = 0; i < pixels.Length; i += 3)
-        {
-            pixels[i] = (byte)((i * 17) % 256);
-            pixels[i + 1] = (byte)((i * 31) % 256);
-            pixels[i + 2] = (byte)((i * 43) % 256);
-        }
-
-        var first = PaletteQuantizer.Quantize(pixels, 40);
-        var second = PaletteQuantizer.Quantize(pixels, 40);
-
-        Assert.Equal(first, second);
-        Assert.InRange(PaletteQuantizer.CountColors(first), 2, 40);
-    }
-
-    [Fact]
-    public void Colour_guard_leaves_an_in_tolerance_portrait_byte_identical()
-    {
-        var regions = Regions();
-        var mask = FigureMaskBuilder.Build(regions);
-        var box = Pattern();
-
-        var result = PortraitPackBuilder.FinalizeReduction(box, regions, mask, box, regions, mask);
-
-        Assert.False(result.ColorMatch.GuardApplied);
-        Assert.Equal(box, result.Pixels);
-    }
-
-    [Fact]
-    public void Colour_guard_applies_a_mean_only_shift_when_a_semantic_region_drifts()
-    {
-        var regions = Regions();
-        var mask = FigureMaskBuilder.Build(regions);
-        var reference = Pattern();
-        var target = Pattern();
-        PaintZone(reference, regions, mask, "Hair", 193, 151, 67);
-        PaintZone(target, regions, mask, "Hair", 91, 57, 37);
-        PaintZone(reference, regions, mask, "InnerTop", 178, 105, 38);
-        PaintZone(target, regions, mask, "InnerTop", 205, 205, 200);
-
-        var guarded = PortraitColorMatcher.ApplyGuard(target, regions, mask, reference, regions, mask);
-        var metrics = guarded.Metrics;
-
-        Assert.True(metrics.GuardApplied);
-        Assert.Contains("Hair", metrics.GuardRegions!);
-        Assert.Contains("InnerTop", metrics.GuardRegions!);
-        Assert.True(metrics.HairHueDelta <= 12, $"hair hue delta was {metrics.HairHueDelta}");
-        Assert.True(metrics.HairLightnessDelta <= 10, $"hair lightness delta was {metrics.HairLightnessDelta}");
-        Assert.True(metrics.GarmentHueDelta <= 15, $"garment hue delta was {metrics.GarmentHueDelta}");
-        Assert.True(metrics.GarmentLightnessDelta <= 10, $"garment lightness delta was {metrics.GarmentLightnessDelta}");
-    }
-
-    [Fact]
-    public void Default_pipeline_output_equals_plain_box_reduction_when_guard_does_not_fire()
-    {
-        using var bitmap = new SKBitmap(128, 128, SKColorType.Rgba8888, SKAlphaType.Opaque);
-        for (var y = 0; y < 128; y++)
-        for (var x = 0; x < 128; x++)
-            bitmap.SetPixel(x, y, new SKColor((byte)(x * 2), (byte)(y * 2), (byte)(x + y)));
-        using var image = SKImage.FromBitmap(bitmap);
-        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
-        var box = PortraitPackBuilder.BoxReduce(encoded.ToArray());
-        var regions = Regions();
-        var mask = FigureMaskBuilder.Build(regions);
-
-        var result = PortraitPackBuilder.FinalizeReduction(box, regions, mask, box, regions, mask,
-            new PortraitReductionOptions(PaletteColors: null, BackgroundCalmAmount: 0));
-
-        Assert.False(result.ColorMatch.GuardApplied);
-        Assert.Equal(box, result.Pixels);
-    }
-
-    [Fact]
-    public void Blink_and_speech_only_composite_inside_their_regions()
-    {
-        var regions = Regions();
-        var original = Pattern();
-        var blink = original.ToArray();
-        PortraitAnimation.ApplyBlink(blink, regions);
-        AssertOnlyRegionsChanged(original, blink, regions.LeftEye, regions.RightEye);
-
-        var speak = original.ToArray();
-        PortraitAnimation.ApplyMouthShape(speak, regions, 2);
-        AssertOnlyRegionsChanged(original, speak, regions.Mouth);
-    }
-
-    [Fact]
-    public void Closed_blink_repaints_every_eye_polygon_pixel_without_retaining_iris_or_pupil_colours()
-    {
-        var landmarks = SyntheticLandmarks();
-        var scaffold = SyntheticScaffold();
-        var regions = landmarks.ApplyTo(scaffold);
-        var basePixels = SyntheticPortrait(landmarks);
-        var closed = basePixels.ToArray();
-        PortraitAnimation.ApplyBlink(closed, regions, landmarks);
-
-        foreach (var outline in new[] { landmarks.LeftEyeOutline, landmarks.RightEyeOutline })
-        {
-            var polygon = PortraitAnimation.RasterizePolygon(outline);
-            var irisAndPupilColours = polygon.Select(point => Color(basePixels, point))
-                .OrderBy(color => .2126 * color.R + .7152 * color.G + .0722 * color.B)
-                .Take(Math.Max(1, polygon.Count / 3)).ToHashSet();
-            Assert.All(polygon, point => Assert.DoesNotContain(Color(closed, point), irisAndPupilColours));
-        }
-    }
-
-    [Fact]
-    public void Resting_blink_sequence_is_open_half_closed_half_open()
-    {
-        var landmarks = SyntheticLandmarks();
-        var scaffold = SyntheticScaffold();
-        var regions = landmarks.ApplyTo(scaffold);
-        var pixels = SyntheticPortrait(landmarks);
-        var mask = FigureMaskBuilder.Build(regions);
-        var half = pixels.ToArray();
-        PortraitAnimation.ApplyBlink(half, regions, landmarks, .5);
-        var closed = pixels.ToArray();
-        PortraitAnimation.ApplyBlink(closed, regions, landmarks);
-        var polygon = PortraitAnimation.RasterizePolygon(landmarks.LeftEyeOutline);
-        var changed = new[] { pixels, half, closed, half, pixels }
-            .Select(frame => polygon.Count(point => PixelChanged(pixels, frame, point.X, point.Y))).ToArray();
-
-        Assert.Equal(0, changed[0]);
-        Assert.InRange(changed[1], 1, changed[2] - 1);
-        Assert.True(changed[2] > changed[1]);
-        Assert.Equal(changed[1], changed[3]);
-        Assert.Equal(0, changed[4]);
-
-        var pack = new PortraitPack(pixels, pixels, mask, regions,
-            new PortraitProvenance("source", "hash", PortraitPackBuilder.PipelineVersion, "test", 1, DateTimeOffset.UnixEpoch, null),
-            PaletteQuantizer.CountColors(pixels), 100,
-            new PortraitColorMatchMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), Landmarks: landmarks);
-        var frames = PortraitAnimation.Render(pack, FaceState.Resting, "#9a7cff", 100).Frames;
-        Assert.Equal(700, frames[7].DurationMs);
-        Assert.Equal([120, 120, 120], frames.Skip(8).Take(3).Select(frame => frame.DurationMs));
-        Assert.Equal(700, frames[11].DurationMs);
-    }
-
-    [Fact]
-    public void Source_hash_change_invalidates_the_pack_cache_key()
+    public void Source_hash_change_invalidates_the_pack()
     {
         var original = PortraitSourceFingerprint.Hash([1, 2, 3]);
-        var same = PortraitSourceFingerprint.Hash([1, 2, 3]);
-        var changed = PortraitSourceFingerprint.Hash([1, 2, 4]);
-
-        Assert.False(PortraitSourceFingerprint.RequiresRebuild(original, same));
-        Assert.True(PortraitSourceFingerprint.RequiresRebuild(original, changed));
-        Assert.True(PortraitSourceFingerprint.RequiresRebuild(null, original));
+        Assert.False(PortraitSourceFingerprint.RequiresRebuild(original, PortraitSourceFingerprint.Hash([1, 2, 3])));
+        Assert.True(PortraitSourceFingerprint.RequiresRebuild(original, PortraitSourceFingerprint.Hash([1, 2, 4])));
     }
 
-    [Fact]
-    public void Every_state_preserves_the_figure_and_has_no_axis_aligned_compositing_seam()
+    private static DecodedVideoFrame VideoFrame(int value)
+        => new(Enumerable.Repeat((byte)value, 768 * 576 * 3).ToArray(), 768, 576);
+
+    private static PortraitPack Pack(byte[] pixels, params PortraitClip[] clips)
+        => new(pixels, new("source", "hash", PortraitPackBuilder.PipelineVersion, DateTimeOffset.UnixEpoch),
+            clips.ToDictionary(clip => clip.Provenance.State));
+
+    private static PortraitClip Clip(FaceState state, byte[] pixels)
+        => new(new FrameLoop([new RgbFrame(pixels, 133)]),
+            new(state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", DateTimeOffset.UnixEpoch));
+
+    private static byte[] SyntheticPortrait()
     {
-        var regions = Regions();
-        var basePixels = Pattern();
-        var mask = FigureMaskBuilder.Build(regions);
-        var metrics = new PortraitColorMatchMetrics(45, 45, 60, 60, 20, 32, 32, 52, 52, 20, 220, 220, 40, 40, 20);
-        var pack = new PortraitPack(basePixels, basePixels, mask, regions,
-            new PortraitProvenance("source", "hash", PortraitPackBuilder.PipelineVersion, "test", 1, DateTimeOffset.UnixEpoch, null),
-            PaletteQuantizer.CountColors(basePixels), 100, metrics);
-
-        foreach (var state in Enum.GetValues<FaceState>())
-        foreach (var frame in PortraitAnimation.Render(pack, state, "#9a7cff", 100).Frames)
-        {
-            var factor = UniformFactor(basePixels, frame.Pixels, mask, regions);
-            for (var y = 0; y < 64; y++)
-            for (var x = 0; x < 64; x++)
-            {
-                if (mask[y * 64 + x] != 255 || regions.LeftEye.Contains(x, y)
-                    || regions.RightEye.Contains(x, y) || regions.Mouth.Contains(x, y)) continue;
-                var i = (y * 64 + x) * 3;
-                for (var channel = 0; channel < 3; channel++)
-                    Assert.InRange(Math.Abs(frame.Pixels[i + channel] - Math.Round(basePixels[i + channel] * factor)), 0, 2);
-            }
-            Assert.True(LongestAxisStep(basePixels, frame.Pixels, factor) < 12,
-                $"{state} contains an axis-aligned compositing discontinuity");
-        }
-    }
-
-    [Fact]
-    public void Speaking_shapes_are_closed_one_and_two_pixel_openings_with_bounded_width()
-    {
-        var regions = Regions() with { Mouth = new PixelRegion(24, 30, 16, 8) };
-        var pixels = Pattern();
-        var pack = new PortraitPack(pixels, pixels, FigureMaskBuilder.Build(regions), regions,
-            new PortraitProvenance("source", "hash", PortraitPackBuilder.PipelineVersion, "test", 1, DateTimeOffset.UnixEpoch, null),
-            PaletteQuantizer.CountColors(pixels), 100,
-            new PortraitColorMatchMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
-        var frames = PortraitAnimation.Render(pack, FaceState.Speaking, "#9a7cff", 100).Frames;
-        var renderedBase = frames[0].Pixels;
-        var closed = pixels.ToArray();
-        PortraitAnimation.ApplyMouthShape(closed, regions, 0);
-        var changedRows = frames.Select(frame => Enumerable.Range(regions.Mouth.Y, regions.Mouth.Height)
-            .Count(y => Enumerable.Range(regions.Mouth.X, regions.Mouth.Width).Any(x => PixelChanged(renderedBase, frame.Pixels, x, y)))).ToArray();
-
-        Assert.Equal([0, 1, 2], changedRows);
-        Assert.Equal(pixels, closed);
-        Assert.InRange(ChangedColumns(renderedBase, frames[1].Pixels, regions.Mouth), 1, 4);
-        Assert.InRange(ChangedColumns(renderedBase, frames[2].Pixels, regions.Mouth), 1, 6);
-        var changed = ChangedColors(renderedBase, frames[2].Pixels, regions.Mouth).ToArray();
-        Assert.All(changed, color =>
-        {
-            Assert.True(color.R >= 52 && color.R > color.G && color.R > color.B);
-            Assert.True(color.G >= 24 && color.B >= 20);
-        });
-    }
-
-    private static PortraitRegions Regions() => new(
-        new(16, 8, 32, 32), new(20, 18, 10, 6), new(34, 18, 10, 6),
-        new(25, 31, 14, 7), new(12, 38, 40, 26), new(10, 4, 44, 60));
-
-    private static byte[] Pattern()
-    {
-        var pixels = new byte[RgbFrame.ByteCount];
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            var i = (y * 64 + x) * 3;
-            pixels[i] = (byte)(40 + x * 2);
-            pixels[i + 1] = (byte)(30 + y * 2);
-            pixels[i + 2] = (byte)(20 + (x + y));
-        }
-        return pixels;
-    }
-
-    private static void AssertOnlyRegionsChanged(byte[] before, byte[] after, params PixelRegion[] allowed)
-    {
-        Assert.NotEqual(before, after);
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            if (allowed.Any(region => region.Contains(x, y))) continue;
-            var i = (y * 64 + x) * 3;
-            Assert.Equal(before[i], after[i]);
-            Assert.Equal(before[i + 1], after[i + 1]);
-            Assert.Equal(before[i + 2], after[i + 2]);
-        }
-    }
-
-    private static double UniformFactor(byte[] before, byte[] after, byte[] mask, PortraitRegions regions)
-    {
-        var ratios = new List<double>();
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            if (mask[y * 64 + x] != 255 || regions.LeftEye.Contains(x, y)
-                || regions.RightEye.Contains(x, y) || regions.Mouth.Contains(x, y)) continue;
-            var i = (y * 64 + x) * 3;
-            for (var channel = 0; channel < 3; channel++)
-                if (before[i + channel] is > 20 and < 220) ratios.Add(after[i + channel] / (double)before[i + channel]);
-        }
-        ratios.Sort();
-        return ratios.Count == 0 ? 1 : ratios[ratios.Count / 2];
-    }
-
-    private static int LongestAxisStep(byte[] before, byte[] after, double factor)
-    {
-        double Delta(int x, int y)
-        {
-            var i = (y * 64 + x) * 3;
-            return Enumerable.Range(0, 3).Average(channel => Math.Abs(after[i + channel] - Math.Round(before[i + channel] * factor)));
-        }
-        var longest = 0;
-        for (var x = 1; x < 64; x++)
-        {
-            var run = 0;
-            for (var y = 0; y < 64; y++) { run = Math.Abs(Delta(x, y) - Delta(x - 1, y)) > 14 ? run + 1 : 0; longest = Math.Max(longest, run); }
-        }
-        for (var y = 1; y < 64; y++)
-        {
-            var run = 0;
-            for (var x = 0; x < 64; x++) { run = Math.Abs(Delta(x, y) - Delta(x, y - 1)) > 14 ? run + 1 : 0; longest = Math.Max(longest, run); }
-        }
-        return longest;
-    }
-
-    private static bool PixelChanged(byte[] before, byte[] after, int x, int y)
-    {
-        var i = (y * 64 + x) * 3;
-        return before[i] != after[i] || before[i + 1] != after[i + 1] || before[i + 2] != after[i + 2];
-    }
-
-    private static (byte R, byte G, byte B) Color(byte[] pixels, PixelPoint point)
-    {
-        var i = (point.Y * 64 + point.X) * 3;
-        return (pixels[i], pixels[i + 1], pixels[i + 2]);
-    }
-
-    private static int ChangedColumns(byte[] before, byte[] after, PixelRegion region)
-        => Enumerable.Range(region.X, region.Width).Count(x => Enumerable.Range(region.Y, region.Height)
-            .Any(y => PixelChanged(before, after, x, y)));
-
-    private static IEnumerable<(byte R, byte G, byte B)> ChangedColors(byte[] before, byte[] after, PixelRegion region)
-    {
-        for (var y = region.Y; y < region.Bottom; y++)
-        for (var x = region.X; x < region.Right; x++)
-        {
-            if (!PixelChanged(before, after, x, y)) continue;
-            var i = (y * 64 + x) * 3;
-            yield return (after[i], after[i + 1], after[i + 2]);
-        }
-    }
-
-    private static void PaintZone(byte[] pixels, PortraitRegions regions, byte[] mask, string zone, byte r, byte g, byte b)
-    {
-        foreach (var pixel in PortraitColorMatcher.RegionIndices(pixels, regions, mask, zone))
-        {
-            var i = pixel * 3;
-            pixels[i] = r; pixels[i + 1] = g; pixels[i + 2] = b;
-        }
-    }
-
-    private static PortraitRegions SyntheticScaffold() => new(
-        new(12, 8, 40, 34), new(0, 0, 1, 1), new(0, 0, 1, 1),
-        new(0, 0, 1, 1), new(10, 38, 44, 26), new(8, 4, 48, 60));
-
-    private static PortraitLandmarks SyntheticLandmarks() => new(
-        "synthetic-test-fixture", 1024, 1024,
-        [new(14, 12), new(28, 8), new(45, 11), new(51, 25), new(47, 40), new(29, 43), new(13, 34)],
-        [new(19, 22), new(22, 20), new(26, 21), new(26, 24), new(23, 26), new(19, 25)],
-        [new(34, 20), new(38, 18), new(42, 20), new(41, 23), new(37, 24), new(34, 22)],
-        [new(27, 32), new(29, 31), new(31, 31), new(33, 32), new(35, 32)],
-        [new(27, 33), new(29, 34), new(31, 34), new(33, 34), new(35, 33)]);
-
-    private static byte[] SyntheticPortrait(PortraitLandmarks landmarks)
-    {
-        var pixels = new byte[RgbFrame.ByteCount];
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            var distance = Math.Pow((x - 31) / 20d, 2) + Math.Pow((y - 27) / 22d, 2);
-            var color = distance <= 1 ? ((byte)206, (byte)151, (byte)116) : ((byte)28, (byte)42, (byte)57);
-            if (y >= 40 && x is >= 9 and <= 55) color = (54, 92, 137);
-            PutSynthetic(pixels, x, y, color);
-        }
-        foreach (var outline in new[] { landmarks.LeftEyeOutline, landmarks.RightEyeOutline })
-        {
-            var eye = PortraitAnimation.RasterizePolygon(outline).ToArray();
-            foreach (var point in eye) PutSynthetic(pixels, point.X, point.Y, (232, 218, 196));
-            var center = eye.OrderBy(point => Math.Abs(point.X - eye.Average(value => value.X))
-                + Math.Abs(point.Y - eye.Average(value => value.Y))).First();
-            PutSynthetic(pixels, center.X, center.Y, (62, 75, 82));
-            if (center.Y + 1 < 64) PutSynthetic(pixels, center.X, center.Y + 1, (25, 31, 36));
-        }
-        foreach (var point in landmarks.LipLine) PutSynthetic(pixels, point.X, point.Y, (111, 48, 45));
-        return pixels;
-    }
-
-    private static void PutSynthetic(byte[] pixels, int x, int y, (byte R, byte G, byte B) color)
-    {
-        var index = (y * 64 + x) * 3;
-        pixels[index] = color.R; pixels[index + 1] = color.G; pixels[index + 2] = color.B;
-    }
-
-    private static void AssertRegionNear(PixelRegion expected, PixelRegion actual)
-    {
-        Assert.InRange(actual.X, expected.X - 1, expected.X + 1);
-        Assert.InRange(actual.Y, expected.Y - 1, expected.Y + 1);
-        Assert.InRange(actual.Width, expected.Width - 1, expected.Width + 1);
-        Assert.InRange(actual.Height, expected.Height - 1, expected.Height + 1);
+        using var bitmap = new SKBitmap(1024, 1024, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        bitmap.Erase(new SKColor(30, 48, 68));
+        using var canvas = new SKCanvas(bitmap);
+        using var skin = new SKPaint { Color = new SKColor(214, 159, 123), IsAntialias = false };
+        using var hair = new SKPaint { Color = new SKColor(205, 166, 72), IsAntialias = false };
+        using var jacket = new SKPaint { Color = new SKColor(58, 98, 148), IsAntialias = false };
+        using var dark = new SKPaint { Color = new SKColor(45, 34, 31), IsAntialias = false };
+        canvas.DrawRect(250, 610, 524, 414, jacket);
+        canvas.DrawOval(new SKRect(326, 130, 698, 650), hair);
+        canvas.DrawOval(new SKRect(366, 175, 658, 585), skin);
+        canvas.DrawOval(new SKRect(418, 335, 456, 358), dark);
+        canvas.DrawOval(new SKRect(550, 320, 589, 343), dark);
+        canvas.DrawRect(474, 480, 98, 18, dark);
+        canvas.Flush();
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+        return encoded.ToArray();
     }
 }

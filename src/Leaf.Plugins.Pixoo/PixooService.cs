@@ -100,6 +100,12 @@ public sealed class PixooService(
         return portraits.Status(agentId);
     }
 
+    public async Task<PortraitPackStatus> PortraitStatusAsync(PixooCaller caller, Guid agentId, CancellationToken ct)
+    {
+        if (!(await AgentsAsync(caller, ct)).Any(agent => agent.Id == agentId)) throw new KeyNotFoundException("Agent not found.");
+        return portraits.Status(agentId);
+    }
+
     public async Task RefreshPortraitAsync(Guid agentId)
     {
         var entitiesForAgent = await entities.QueryAsync(new EntityQuery
