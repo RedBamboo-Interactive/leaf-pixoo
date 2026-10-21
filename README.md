@@ -1,6 +1,6 @@
 # Leaf Pixoo
 
-Leaf Pixoo is a RedLeaf extension that gives one selected Agent a quiet 64×64 peripheral face. v1 is emulator-first: its Leaf page renders the current server-generated loop as a convincing LED matrix, lets the owner bind devices to Agent entities, and provides explicit state/gesture simulation. The same surface is contributed to Nova as its **Display** section, scoped to Nova's selected Agent.
+Leaf Pixoo is a RedLeaf extension that turns each configured display into one Agent's quiet 64×64 peripheral face. v1 is emulator-first: its Leaf page renders the current server-generated loop as a convincing LED matrix, lets the owner select a display and independently bind it to any available Agent entity, and provides explicit state/gesture simulation. The same device-first surface is contributed to Nova as its **Display** section.
 
 It is intentionally a face, not a dashboard. It never renders conversation text, Agent names, notifications, clocks, or status icons on the display.
 
@@ -15,10 +15,10 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - One serialized latest-wins queue per device. A push is a complete multi-frame loop; unchanged state does not push, and changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
 - RedLeaf design-system chrome from `@redbamboo/ui` with Tailwind v4 tokens in both light and dark themes. Only the physical LED matrix, glow, gaps, and bezel are bespoke.
-- A standalone Leaf surface at `/apps/pixoo/emulator`, including canonical Agent `EntityCard` references and a design-system Agent picker.
-- A Nova `app-section` at `/apps/nova/display`; it reads Nova's reactive `nova_settings.agentFilter`, lists only devices bound to that exact Agent, and offers no independent Agent dropdown.
+- A standalone Leaf surface at `/apps/pixoo/emulator`, including a device list, editable device name, canonical Agent `EntityCard` references, and a design-system Agent picker.
+- A Nova `app-section` at `/apps/nova/display` with the same device-first controls. Device bindings are independent of Nova's selected-Agent filter.
 
-Nova's extension component context currently contains contributor/extension/target/route metadata, not Agent identity. Nova itself stores the selected Agent as `agentFilter` in the shared `nova_settings` local store. Pixoo observes that canonical local store through `@redbamboo/utility`; when Nova is in its all-Agents state, the section asks the owner to choose an Agent instead of guessing one.
+With no device records, both surfaces show a first-run **Add display** action. One device is selected automatically; with several, the owner selects the device before changing its name, Agent binding, brightness, simulated state, or gesture. Each device remains bound to exactly one Agent.
 
 ## Portrait packs
 
@@ -72,7 +72,7 @@ Pop-Location
 .\build-leafpkg.ps1 -LeafSdkProject 'T:\Projects\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj'
 ```
 
-The local visual harness is `pnpm run dev` from `web/`; in development only, it reads `artifacts/portrait/portrait-preview.json` so Playwright can exercise the accepted Nova pack without installing the extension or contacting Leaf. `node tests/visual.cjs` captures desktop and phone evidence. Production builds do not copy the harness preview.
+The local visual harness is `pnpm run dev` from `web/`; in development only, it reads `artifacts/portrait/portrait-preview.json` so Playwright can exercise the accepted Nova pack without installing the extension or contacting Leaf. `node tests/visual.cjs` captures portrait state evidence, while `node tests/device-primary.visual.cjs` covers empty, one-device, and two-device flows at desktop and phone sizes. Production builds do not copy the harness preview.
 
 ## Loading after review
 

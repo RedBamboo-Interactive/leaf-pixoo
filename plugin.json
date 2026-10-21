@@ -24,12 +24,12 @@
         "target": "nova",
         "slot": "app-section",
         "order": 3,
-        "description": "The selected Agent's Pixoo peripheral face and emulators.",
+        "description": "Configure Pixoo displays and choose the Agent each one represents.",
         "section": {
           "name": "Display",
           "icon": "ph-bold ph-monitor-play",
           "path": "display",
-          "description": "Pixoo displays bound to the selected Agent."
+          "description": "Pixoo displays and their Agent bindings."
         }
       }
     ]

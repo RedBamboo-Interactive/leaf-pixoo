@@ -3,11 +3,15 @@ import {createExecutionTokenClient} from '@redbamboo/utility'
 
 const base='/api/extensions/pixoo'
 const client=createExecutionTokenClient('pixoo')
-const harness=location.port==='4173' || new URLSearchParams(location.search).has('harness')
-const ids={device:'11111111-1111-1111-1111-111111111111',agent:'22222222-2222-2222-2222-222222222222'}
-const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff',avatarUrl:'/source-crop.png'},{id:'33333333-3333-3333-3333-333333333333',name:'Vesper',color:'#78e6c4'}]
-let device:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
-let snapshot:Snapshot={device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}]}
+const params=new URLSearchParams(location.search)
+const harness=location.port==='4173' || params.has('harness')
+const ids={device:'11111111-1111-1111-1111-111111111111',second:'44444444-4444-4444-4444-444444444444',agent:'22222222-2222-2222-2222-222222222222',secondAgent:'33333333-3333-3333-3333-333333333333'}
+const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff',avatarUrl:'/source-crop.png'},{id:ids.secondAgent,name:'Vesper',color:'#78e6c4'}]
+const primary:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
+const secondary:Device={id:ids.second,name:'Studio shelf',kind:'emulator',brightness:68,agentId:ids.secondAgent,agentColor:'#78e6c4',minimumPushGapMs:1000,hardwareEnabled:false}
+const scenario=params.get('scenario')??'one'
+let devices:Device[]=scenario==='empty'?[]:scenario==='two'?[primary,secondary]:[primary]
+const snapshots=new Map<string,Snapshot>(devices.map(device=>[device.id,makeSnapshot(device)]))
 let preview:Partial<Record<FaceState,Frame[]>>|null=null
 let previewRequest:Promise<void>|null=null
 
@@ -17,28 +21,53 @@ async function json<T>(path:string,init?:RequestInit):Promise<T>{
   return response.json() as Promise<T>
 }
 export async function listAgents(){return harness?agents:json<Agent[]>('/agents')}
-export async function listDevices(){return harness?[device]:json<Device[]>('/devices')}
+export async function listDevices(){return harness?devices:json<Device[]>('/devices')}
 export async function current(deviceId:string){
   if(!harness)return json<Snapshot>(`/emulator?deviceId=${encodeURIComponent(deviceId)}`)
-  await loadPreview();snapshot={...snapshot,frames:preview?.[snapshot.state]??snapshot.frames};return snapshot
+  await loadPreview()
+  const snapshot=snapshots.get(deviceId)
+  if(!snapshot)throw new Error('Display not found')
+  const next={...snapshot,frames:preview?.[snapshot.state]??snapshot.frames}
+  snapshots.set(deviceId,next)
+  return next
 }
 export async function updateDevice(value:Device){
-  if(harness){device={...value,agentColor:agents.find(a=>a.id===value.agentId)?.color??value.agentColor};snapshot={...snapshot,device};return device}
+  if(harness){
+    const saved={...value,agentColor:agents.find(agent=>agent.id===value.agentId)?.color??value.agentColor}
+    devices=devices.map(device=>device.id===saved.id?saved:device)
+    const snapshot=snapshots.get(saved.id)??makeSnapshot(saved)
+    snapshots.set(saved.id,{...snapshot,device:saved})
+    return saved
+  }
   return json<Device>(`/devices/${value.id}`,{method:'PUT',body:JSON.stringify(value)})
 }
-export async function createDevice(agentId:string){
-  const value={name:'Living room emulator',kind:'emulator' as const,brightness:74,agentId,agentColor:agents.find(a=>a.id===agentId)?.color??'#7c5cff',minimumPushGapMs:1000,hardwareEnabled:false}
-  if(harness){await loadPreview();device={id:ids.device,...value};snapshot={device,state:'resting',frames:preview?.resting??render('resting',device.agentColor,device.brightness),history:[]};return device}
+export async function createDevice(agentId:string,name='Display'){
+  const value={name,kind:'emulator' as const,brightness:74,agentId,agentColor:agents.find(agent=>agent.id===agentId)?.color??'#7c5cff',minimumPushGapMs:1000,hardwareEnabled:false}
+  if(harness){
+    await loadPreview()
+    const made={id:crypto.randomUUID(),...value}
+    devices=[...devices,made]
+    snapshots.set(made.id,{...makeSnapshot(made),frames:preview?.resting??render('resting',made.agentColor,made.brightness)})
+    return made
+  }
   return json<Device>('/devices',{method:'POST',body:JSON.stringify(value)})
 }
 export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGesture){
   if(harness){
     await loadPreview()
+    const device=devices.find(item=>item.id===deviceId)
+    if(!device)throw new Error('Display not found')
+    const previous=snapshots.get(deviceId)??makeSnapshot(device)
     const frames=gesture?render(state,device.agentColor,device.brightness,gesture):preview?.[state]??render(state,device.agentColor,device.brightness)
-    snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...snapshot.history].slice(0,8)}
+    const snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...previous.history].slice(0,8)}
+    snapshots.set(deviceId,snapshot)
     return snapshot
   }
   return json<Snapshot>(`/devices/${deviceId}/simulate`,{method:'POST',body:JSON.stringify({state,gesture})})
+}
+
+function makeSnapshot(device:Device):Snapshot{
+  return {device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}]}
 }
 
 async function loadPreview(){

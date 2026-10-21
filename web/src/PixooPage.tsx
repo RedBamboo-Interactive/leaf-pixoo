@@ -1,60 +1,57 @@
 import {useEffect,useMemo,useState,type CSSProperties} from 'react'
 import {
   Badge,Button,Card,CardAction,CardContent,CardDescription,CardHeader,CardTitle,
-  Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle,EntityCard,Label,
-  PanelHeader,ScrollArea,Select,SelectContent,SelectItem,SelectTrigger,SelectValue,Slider,
+  Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle,EntityCard,Input,Label,
+  PanelHeader,ScrollArea,Slider,
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
-import {
-  createLocalStore,useLocalStore,type LeafPluginExtensionProps,
-} from '@redbamboo/utility'
+import type {LeafPluginExtensionProps} from '@redbamboo/utility'
 import {createDevice,current,listAgents,listDevices,simulate,updateDevice} from './api'
 import type {Agent,Device,FaceGesture,FaceState,Snapshot} from './types'
 
 const states:FaceState[]=['dark','resting','listening','thinking','speaking','working','dreaming','asleep']
-const novaSettings=createLocalStore<{agentFilter:string|null}>('nova_settings',{agentFilter:null})
+type PickerMode='create'|'bind'
 
 export function PixooNovaSection(_props:LeafPluginExtensionProps){
-  const {agentFilter}=useLocalStore(novaSettings)
-  return <PixooPage scopedAgentId={agentFilter} embedded/>
+  return <PixooPage embedded/>
 }
 
-export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|null;embedded?:boolean}={}){
+export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   const [agents,setAgents]=useState<Agent[]>([])
   const [devices,setDevices]=useState<Device[]>([])
   const [selected,setSelected]=useState('')
-  const [draftAgent,setDraftAgent]=useState('')
+  const [name,setName]=useState('')
+  const [pickerMode,setPickerMode]=useState<PickerMode>('bind')
   const [agentPickerOpen,setAgentPickerOpen]=useState(false)
   const [view,setView]=useState<Snapshot|null>(null)
   const [frame,setFrame]=useState(0)
+  const [loading,setLoading]=useState(true)
   const [busy,setBusy]=useState(false)
   const [error,setError]=useState('')
-  const scoped=embedded
-  const visibleDevices=useMemo(
-    ()=>scoped?devices.filter(item=>item.agentId===scopedAgentId):devices,
-    [devices,scoped,scopedAgentId],
-  )
   const device=devices.find(item=>item.id===selected)
-  const selectedAgent=agents.find(agent=>agent.id===(scoped?scopedAgentId:device?.agentId??draftAgent))
+  const selectedAgent=agents.find(agent=>agent.id===device?.agentId)
 
   useEffect(()=>{
     let alive=true
     void Promise.all([listAgents(),listDevices()]).then(([nextAgents,nextDevices])=>{
       if(!alive)return
       setAgents(nextAgents)
-      setDraftAgent(nextAgents[0]?.id??'')
       setDevices(nextDevices)
-    }).catch(reason=>setError(message(reason)))
+    }).catch(reason=>setError(message(reason))).finally(()=>{if(alive)setLoading(false)})
     return()=>{alive=false}
   },[])
 
   useEffect(()=>{
-    setSelected(previous=>visibleDevices.some(item=>item.id===previous)?previous:visibleDevices[0]?.id??'')
-  },[visibleDevices])
+    setSelected(previous=>devices.some(item=>item.id===previous)?previous:devices[0]?.id??'')
+  },[devices])
+
+  useEffect(()=>setName(device?.name??''),[device?.id,device?.name])
 
   useEffect(()=>{
     if(!selected){setView(null);return}
-    void current(selected).then(setView).catch(reason=>setError(message(reason)))
+    let alive=true
+    void current(selected).then(snapshot=>{if(alive)setView(snapshot)}).catch(reason=>setError(message(reason)))
+    return()=>{alive=false}
   },[selected])
 
   useEffect(()=>{
@@ -64,7 +61,7 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
     return()=>window.clearTimeout(timer)
   },[view,frame])
 
-  useEffect(()=>setFrame(0),[view?.state,view?.gesture])
+  useEffect(()=>setFrame(0),[view?.state,view?.gesture,selected])
 
   const pixels=useMemo(
     ()=>decode(view?.frames[frame%Math.max(1,view.frames.length)]?.pixels),
@@ -81,33 +78,49 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
 
   const save=async(patch:Partial<Device>)=>{
     if(!device)return
+    const previous=device
     const next={...device,...patch}
     setDevices(items=>items.map(item=>item.id===next.id?next:item))
+    setError('')
     try{
       const saved=await updateDevice(next)
       setDevices(items=>items.map(item=>item.id===saved.id?saved:item))
       setView(await current(saved.id))
-    }catch(reason){setError(message(reason))}
+    }catch(reason){
+      setDevices(items=>items.map(item=>item.id===previous.id?previous:item))
+      setError(message(reason))
+    }
   }
 
-  const bindAgent=(agent:Agent)=>{
-    setDraftAgent(agent.id)
+  const commitName=()=>{
+    const trimmed=name.trim()
+    if(!device)return
+    if(!trimmed){setName(device.name);return}
+    if(trimmed!==device.name)void save({name:trimmed})
+  }
+
+  const openPicker=(mode:PickerMode)=>{
+    setPickerMode(mode)
+    setAgentPickerOpen(true)
+  }
+
+  const chooseAgent=async(agent:Agent)=>{
     setAgentPickerOpen(false)
-    if(device)void save({agentId:agent.id})
-  }
-
-  const add=async()=>{
-    const agentId=scoped?scopedAgentId:draftAgent
-    if(!agentId)return
+    if(pickerMode==='bind'){
+      await save({agentId:agent.id})
+      return
+    }
     setBusy(true);setError('')
     try{
-      const made=await createDevice(agentId)
+      const made=await createDevice(agent.id,`Display ${devices.length+1}`)
       setDevices(items=>[...items.filter(item=>item.id!==made.id),made])
       setSelected(made.id)
       setView(await current(made.id))
     }catch(reason){setError(message(reason))}
     finally{setBusy(false)}
   }
+
+  const openCreate=()=>openPicker('create')
 
   return <main className="min-h-full bg-background text-foreground" data-ui-surface={embedded?'pixoo-nova-section':'pixoo-emulator'}>
     <PanelHeader
@@ -117,11 +130,22 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
       <Badge variant="outline">64 × 64</Badge>
     </PanelHeader>
 
-    {scoped&&!scopedAgentId?<div className="mx-auto max-w-xl p-6 sm:p-10">
+    {!loading&&devices.length===0?<div className="mx-auto max-w-xl p-4 sm:p-10">
       <Card>
-        <CardHeader><CardTitle>Choose an Agent in Nova</CardTitle><CardDescription>The Display section follows Nova's current Agent filter.</CardDescription></CardHeader>
+        <CardHeader>
+          <CardTitle>No displays yet</CardTitle>
+          <CardDescription>Add an emulator, then choose the Agent it should represent. Real Pixoo-64 devices can be added later.</CardDescription>
+          <CardAction><i className="ph-bold ph-monitor-play text-xl text-text-muted" aria-hidden="true"/></CardAction>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Button onClick={openCreate} disabled={busy||agents.length===0}>
+            <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
+          </Button>
+          {agents.length===0&&<p className="text-sm text-text-muted">An Agent is required before a display can be added.</p>}
+          {error&&<p role="alert" className="text-sm text-destructive">{error}</p>}
+        </CardContent>
       </Card>
-    </div>:<div className="mx-auto grid max-w-7xl items-start gap-5 p-3 sm:p-6 lg:grid-cols-[minmax(22rem,1.35fr)_minmax(19rem,.8fr)] lg:gap-8">
+    </div>:devices.length>0?<div className="mx-auto grid max-w-7xl items-start gap-5 p-3 sm:p-6 lg:grid-cols-[minmax(22rem,1.35fr)_minmax(19rem,.8fr)] lg:gap-8">
       <section className="flex min-w-0 flex-col items-center" aria-label="LED matrix emulator">
         <div className="pixoo-bezel">
           <div className="pixoo-matrix" role="img" aria-label={`${view?.state??'dark'} pixel face`}>
@@ -139,39 +163,61 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
       <aside className="flex min-w-0 flex-col gap-4" aria-label="Pixoo controls">
         <Card size="sm">
           <CardHeader>
-            <CardTitle>Display binding</CardTitle>
-            <CardDescription>{embedded?'Devices bound to Nova’s selected Agent.':'Choose the device and Agent represented by this face.'}</CardDescription>
-            <CardAction><Badge variant={device?.kind==='pixoo64'?'outline':'secondary'}>{device?.kind??'no device'}</Badge></CardAction>
+            <CardTitle>Displays</CardTitle>
+            <CardDescription>Choose a display to preview and configure.</CardDescription>
+            <CardAction><Badge variant="secondary">{devices.length}</Badge></CardAction>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-2" role="list" aria-label="Display devices">
+              {devices.map(item=>{
+                const agent=agents.find(candidate=>candidate.id===item.agentId)
+                return <EntityCard
+                  key={item.id}
+                  entity={{id:item.id,typeSlug:'pixoo-device',name:item.name}}
+                  visual={{icon:'ph-bold ph-monitor-play',color:item.agentColor}}
+                  subtitle={`${item.kind==='pixoo64'?'Pixoo-64':'Emulator'} · ${agent?.name??'Unknown Agent'}`}
+                  badge={<Badge variant={item.kind==='pixoo64'?'outline':'secondary'}>{item.kind==='pixoo64'?'hardware':'emulator'}</Badge>}
+                  variant="outlined"
+                  selected={item.id===selected}
+                  action={{kind:'button',ariaLabel:`Select ${item.name}`,onActivate:()=>setSelected(item.id)}}
+                />
+              })}
+            </div>
+            <Button variant="outline" className="w-full" disabled={busy||agents.length===0} onClick={openCreate}>
+              <i className="ph-bold ph-plus" aria-hidden="true"/> Add display
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card size="sm">
+          <CardHeader>
+            <CardTitle>Display settings</CardTitle>
+            <CardDescription>This display represents exactly one Agent.</CardDescription>
+            <CardAction><Badge variant={device?.kind==='pixoo64'?'outline':'secondary'}>{device?.kind??'display'}</Badge></CardAction>
           </CardHeader>
           <CardContent className="space-y-4">
-            {visibleDevices.length>0&&<div className="space-y-2">
-              <Label>Device</Label>
-              <Select value={selected} onValueChange={value=>setSelected(typeof value==='string'?value:'')}>
-                <SelectTrigger className="w-full" aria-label="Device"><SelectValue>{value=>visibleDevices.find(item=>item.id===value)?.name??String(value??'')}</SelectValue></SelectTrigger>
-                <SelectContent>{visibleDevices.map(item=><SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>}
+            <div className="space-y-2">
+              <Label htmlFor="pixoo-device-name">Name</Label>
+              <Input id="pixoo-device-name" value={name} maxLength={80} disabled={busy}
+                onChange={event=>setName(event.target.value)} onBlur={commitName}
+                onKeyDown={event=>{if(event.key==='Enter')event.currentTarget.blur()}}/>
+            </div>
 
-            {selectedAgent?<div className="space-y-2">
+            <div className="space-y-2">
               <Label>Agent</Label>
-              <EntityCard
+              {selectedAgent?<EntityCard
                 entity={{id:selectedAgent.id,typeSlug:'agent',name:selectedAgent.name}}
                 visual={{src:selectedAgent.avatarUrl,fallbackText:selectedAgent.name,shape:'circle'}}
-                subtitle={embedded?'Selected in Nova':'Bound Agent'}
+                subtitle="Bound Agent"
                 variant="outlined"
-                actions={!embedded?<Button variant="outline" size="sm" onClick={()=>setAgentPickerOpen(true)}>Change</Button>:undefined}
-              />
-            </div>:!embedded&&<Button variant="outline" className="w-full" onClick={()=>setAgentPickerOpen(true)}>Choose Agent</Button>}
+                actions={<Button variant="outline" size="sm" onClick={()=>openPicker('bind')}>Change</Button>}
+              />:<Button variant="outline" className="w-full" onClick={()=>openPicker('bind')}>Choose Agent</Button>}
+            </div>
 
             {device&&<div className="space-y-3">
               <div className="flex items-center justify-between gap-3"><Label htmlFor="pixoo-brightness">Brightness</Label><output className="text-xs tabular-nums text-text-muted">{device.brightness}%</output></div>
               <Slider id="pixoo-brightness" aria-label="Brightness" min={0} max={100} value={[device.brightness]} onValueChange={value=>void save({brightness:Array.isArray(value)?value[0]??0:value})}/>
             </div>}
-
-            {!device&&<p className="rounded-lg border border-dashed border-overlay-6 p-4 text-center text-sm text-text-muted">No display is bound to this Agent.</p>}
-            <Button variant="outline" className="w-full" disabled={busy||!selectedAgent} onClick={()=>void add()}>
-              <i className="ph-bold ph-plus" aria-hidden="true"/> Add emulator
-            </Button>
           </CardContent>
         </Card>
 
@@ -206,18 +252,19 @@ export function PixooPage({scopedAgentId,embedded=false}:{scopedAgentId?:string|
 
         {error&&<Card size="sm" role="alert" className="ring-destructive-a20"><CardContent className="text-destructive">{error}</CardContent></Card>}
       </aside>
-    </div>}
+    </div>:null}
 
-    {!embedded&&<AgentPicker open={agentPickerOpen} agents={agents} selectedId={device?.agentId??draftAgent} onOpenChange={setAgentPickerOpen} onSelect={bindAgent}/>}
+    <AgentPicker open={agentPickerOpen} agents={agents} selectedId={pickerMode==='bind'?device?.agentId:undefined}
+      mode={pickerMode} onOpenChange={setAgentPickerOpen} onSelect={agent=>void chooseAgent(agent)}/>
   </main>
 }
 
-function AgentPicker({open,agents,selectedId,onOpenChange,onSelect}:{
-  open:boolean;agents:Agent[];selectedId:string;onOpenChange:(open:boolean)=>void;onSelect:(agent:Agent)=>void
+function AgentPicker({open,agents,selectedId,mode,onOpenChange,onSelect}:{
+  open:boolean;agents:Agent[];selectedId?:string;mode:PickerMode;onOpenChange:(open:boolean)=>void;onSelect:(agent:Agent)=>void
 }){
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent>
-      <DialogHeader><DialogTitle>Choose an Agent</DialogTitle><DialogDescription>The display will represent exactly this Agent.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>{mode==='create'?'Add display':'Choose an Agent'}</DialogTitle><DialogDescription>{mode==='create'?'Choose the Agent for this emulator.':'The selected display will represent exactly this Agent.'}</DialogDescription></DialogHeader>
       <ScrollArea className="max-h-96">
         <div className="space-y-2 pr-2">{agents.map(agent=><EntityCard
           key={agent.id}
