@@ -135,6 +135,19 @@ public sealed class PixooService(
         foreach (var device in devices) await Push(device, ambient, null, "startup", ct);
     }
 
+    /// <summary>Show an Agent's live activity on every display bound to it; null returns to the ambient state.</summary>
+    public async Task ApplyAgentActivityAsync(Guid agentId, FaceState? active, CancellationToken ct)
+    {
+        var state = active ?? AmbientStateSelector.Select(DateTimeOffset.Now, playbackSettings);
+        var bound = await entities.QueryAsync(new EntityQuery
+        {
+            TypeSlug = DeviceEntityType,
+            DataEquals = new Dictionary<string, object?> { ["agent_id"] = agentId.ToString() },
+            Limit = 100,
+        }, ct);
+        foreach (var device in bound.Select(Decode)) await Push(device, state, null, AgentActivityTracker.EventType, ct);
+    }
+
     public async Task ApplyAmbientStateAsync(FaceState ambient, CancellationToken ct)
     {
         var all = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType, Limit = 100 }, ct);

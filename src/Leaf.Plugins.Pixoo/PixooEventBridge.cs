@@ -11,6 +11,7 @@ namespace Leaf.Plugins.Pixoo;
 public sealed class PixooEventBridge(IPluginEvents events, PixooService service, PortraitPackService portraits) : IDisposable
 {
     private readonly List<IDisposable> subscriptions = [];
+    private readonly AgentActivityTracker activity = new();
 
     public void Start()
     {
@@ -19,6 +20,26 @@ public sealed class PixooEventBridge(IPluginEvents events, PixooService service,
             subscriptions.Add(events.Subscribe(type, Handle));
         subscriptions.Add(events.Subscribe("entity.updated", HandlePortrait));
         subscriptions.Add(events.Subscribe("agent.avatar-changed", HandlePortrait));
+        subscriptions.Add(events.Subscribe(AgentActivityTracker.EventType, HandleActivity));
+    }
+
+    /// <summary>
+    /// Nova's content-free activity signal. Bus handlers run inline in the publisher, so only fold
+    /// the state here and hand the device work off; a slow display must never hold Nova up.
+    /// </summary>
+    internal Task HandleActivity(PluginEvent evt)
+    {
+        if (evt.SourcePlugin != "nova") return Task.CompletedTask;
+        (Guid AgentId, FaceState? State)? change;
+        try { change = activity.Apply(evt.Payload); }
+        catch (Exception) { return Task.CompletedTask; }
+        if (change is not { } value) return Task.CompletedTask;
+        _ = Task.Run(async () =>
+        {
+            try { await service.ApplyAgentActivityAsync(value.AgentId, value.State, CancellationToken.None); }
+            catch (Exception) { /* Device status surfaces delivery failures. */ }
+        });
+        return Task.CompletedTask;
     }
 
     private async Task HandlePortrait(PluginEvent evt)
