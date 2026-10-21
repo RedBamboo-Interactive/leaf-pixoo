@@ -25,12 +25,18 @@ public sealed class PixooPlugin : ILeafPlugin
     public void ConfigureServices(IServiceCollection services, PluginContext ctx)
     {
         services.AddSingleton<IPushClock, SystemPushClock>();
-        services.AddSingleton<IMotionGapRandom, SystemMotionGapRandom>();
+        services.AddSingleton<IRotationRandom, SystemRotationRandom>();
+        services.AddSingleton(PixooPlaybackSettings.FromEnvironment());
+        services.AddSingleton(new CompositeSettings());
+        services.AddSingleton<DisplayPlaybackStatusStore>();
+        services.AddSingleton<IGifEncoder, FfmpegGifEncoder>();
+        services.AddSingleton<ILanGifHost, LanGifHost>();
         services.AddSingleton<ProceduralFaceRenderer>();
         services.AddSingleton<IAgentEventMapper, StrictAgentEventMapper>();
         services.AddSingleton<EmulatorSink>();
         services.AddSingleton(new PortraitClipSettings());
-        services.AddSingleton<MotionReplayScheduler>();
+        services.AddSingleton<AnimationRotationScheduler>();
+        services.AddSingleton<AmbientStateScheduler>();
         services.AddSingleton<IVideoFrameDecoder, FfmpegVideoFrameDecoder>();
         services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(4) });
         services.AddSingleton<Pixoo64Sink>();
@@ -54,9 +60,11 @@ public sealed class PixooPlugin : ILeafPlugin
                 sp.GetRequiredService<EmulatorSink>(),
                 sp.GetRequiredService<Pixoo64Sink>(),
                 sp.GetRequiredService<IPushClock>(),
-                sp.GetRequiredService<MotionReplayScheduler>(),
+                sp.GetRequiredService<AnimationRotationScheduler>(),
                 sp.GetRequiredService<IAgentEventMapper>(),
-                portraits);
+                portraits,
+                sp.GetRequiredService<DisplayPlaybackStatusStore>(),
+                sp.GetRequiredService<PixooPlaybackSettings>());
             portraits.PackReady += service.RefreshPortraitAsync;
             return service;
         });
@@ -70,6 +78,7 @@ public sealed class PixooPlugin : ILeafPlugin
     {
         host.GetRequiredService<PixooEventBridge>().Start();
         var service = host.GetRequiredService<PixooService>();
+        host.GetRequiredService<AmbientStateScheduler>().Start(service.ApplyAmbientStateAsync);
         // Fire and forget: a slow or unreachable display must never delay Leaf startup.
         _ = Task.Run(async () =>
         {
@@ -93,8 +102,8 @@ public sealed class PixooPlugin : ILeafPlugin
         {
             id = Id,
             contract = "leaf.pixoo/1",
-            deviceModel = "64x64 RGB still/motion loops; server-scheduled held motion; serialized latest-wins queue",
-            hardware = "Validated on Pixoo-64 and disabled by default; explicit host only; no discovery or cloud",
+            deviceModel = "64x64 uniform-timing GIF state programs; long pauses live inside each GIF",
+            hardware = "Validated local Device/PlayTFGif delivery with confirmed LAN fetch; <=40 frame push fallback; no discovery or cloud",
             liveEvents = "identity-strict adapter present; current kernel does not expose Compute /ws frames to backend plugins",
         }));
         group.MapGet("/agents", async (HttpContext context, PixooService service, CancellationToken ct) => Results.Ok(await service.AgentsAsync(PixooCaller.From(context.User), ct)));
@@ -105,6 +114,8 @@ public sealed class PixooPlugin : ILeafPlugin
             Results.Ok(await service.UpdateAsync(PixooCaller.From(context.User), id, await Read<DeviceChange>(context, ct), ct)));
         group.MapGet("/emulator", async (Guid? deviceId, HttpContext context, PixooService service, CancellationToken ct) =>
             await service.SnapshotAsync(PixooCaller.From(context.User), deviceId, ct) is { } snapshot ? Results.Ok(snapshot) : Results.NotFound());
+        group.MapGet("/devices/{id:guid}/playback", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
+            Results.Ok(await service.PlaybackAsync(PixooCaller.From(context.User), id, ct)));
         group.MapPost("/devices/{id:guid}/simulate", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
         {
             var request = await Read<SimulateRequest>(context, ct);

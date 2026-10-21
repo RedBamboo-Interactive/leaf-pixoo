@@ -22,18 +22,10 @@ public sealed class ProceduralFaceRenderer : IFaceRenderer
             FaceState.Dreaming => new[] { .30, .48, .65, .48 },
             _ => new[] { .5 },
         };
-        var duration = state switch
-        {
-            FaceState.Resting => 700,
-            FaceState.Asleep => 1000,
-            FaceState.Thinking or FaceState.Working => 280,
-            FaceState.Speaking => 180,
-            _ => 450,
-        };
+        const int duration = 100;
         if (gesture is not null)
         {
             levels = [.72, .92, .82, .70];
-            duration = 160;
         }
         var frames = levels.Select((level, index) => Draw(state, gesture, rgb, brightness, level, index, levels.Length, duration)).ToArray();
         var loop = new FrameLoop(frames).Validate();

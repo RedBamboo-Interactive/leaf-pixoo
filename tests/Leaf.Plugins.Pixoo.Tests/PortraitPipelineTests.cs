@@ -62,11 +62,11 @@ public sealed class PortraitPipelineTests
         var still = PortraitClipProcessor.BuildStillLoop(stillPixels);
 
         Assert.Equal(20, motion.Frames.Count);
-        Assert.All(motion.Frames, frame => Assert.Equal(128, frame.DurationMs));
+        Assert.All(motion.Frames, frame => Assert.Equal(100, frame.DurationMs));
         Assert.All(motion.Frames[1].Pixels, value => Assert.Equal((byte)2, value));
         Assert.All(motion.Frames[^1].Pixels, value => Assert.Equal((byte)38, value));
         Assert.Single(still.Frames);
-        Assert.Equal(1000, still.Frames[0].DurationMs);
+        Assert.Equal(100, still.Frames[0].DurationMs);
         Assert.Equal(stillPixels, still.Frames[0].Pixels);
         Assert.NotSame(stillPixels, still.Frames[0].Pixels);
     }
@@ -94,7 +94,7 @@ public sealed class PortraitPipelineTests
         Assert.Single(program.Still.Frames);
         Assert.Null(program.Motion);
         Assert.Equal(pixels, program.InitialLoop.Frames[0].Pixels);
-        Assert.Equal(1000, program.InitialLoop.Frames[0].DurationMs);
+        Assert.Equal(100, program.InitialLoop.Frames[0].DurationMs);
     }
 
     [Fact]
@@ -110,7 +110,7 @@ public sealed class PortraitPipelineTests
 
         Assert.Equal(DisplayPlaybackMode.Continuous, working.Mode);
         Assert.All(working.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)200, value));
-        Assert.Equal(DisplayPlaybackMode.Held, asleep.Mode);
+        Assert.Equal(DisplayPlaybackMode.Continuous, asleep.Mode);
         Assert.All(asleep.Still.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
         Assert.All(asleep.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
     }
@@ -118,21 +118,24 @@ public sealed class PortraitPipelineTests
     [Fact]
     public async Task Generation_is_ordered_and_bounded_to_two_attempts_per_clip()
     {
-        var calls = new List<(FaceState State, int Attempt)>();
+        var calls = new List<(string Key, int Attempt)>();
         var settings = new PortraitClipSettings { RetryCooldown = TimeSpan.Zero };
 
-        await PortraitClipPlan.ExecuteAsync((state, attempt, _) =>
+        await PortraitClipPlan.ExecuteAsync((spec, attempt, _) =>
         {
-            calls.Add((state, attempt));
-            return Task.FromResult(state != FaceState.Speaking);
+            calls.Add((spec.Key, attempt));
+            return Task.FromResult(spec.State != FaceState.Speaking);
         }, settings, CancellationToken.None);
 
         Assert.Equal([
-            (FaceState.Resting, 1),
-            (FaceState.Speaking, 1), (FaceState.Speaking, 2),
-            (FaceState.Listening, 1),
-            (FaceState.Thinking, 1),
-            (FaceState.Dreaming, 1),
+            ("resting-look-down", 1),
+            ("resting-glance-aside", 1),
+            ("resting-private-smile", 1),
+            ("resting-breathe-blink", 1),
+            ("speaking", 1), ("speaking", 2),
+            ("listening", 1),
+            ("thinking", 1),
+            ("dreaming", 1),
         ], calls);
     }
 
@@ -190,11 +193,11 @@ public sealed class PortraitPipelineTests
 
     private static PortraitPack Pack(byte[] pixels, params PortraitClip[] clips)
         => new(pixels, new("source", "hash", PortraitPackBuilder.PipelineVersion, DateTimeOffset.UnixEpoch),
-            clips.ToDictionary(clip => clip.Provenance.State));
+            clips.ToDictionary(clip => clip.Provenance.Key));
 
     private static PortraitClip Clip(FaceState state, byte[] pixels)
         => new(new FrameLoop([new RgbFrame(pixels, 133)]),
-            new(state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", null,
+            new(PortraitClipPlan.PrimaryKey(state), state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", null,
                 DateTimeOffset.UnixEpoch));
 
     private static byte[] SyntheticPortrait()

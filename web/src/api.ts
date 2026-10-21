@@ -1,4 +1,4 @@
-import type {Agent,Device,FaceGesture,FaceState,Frame,PortraitStatus,Snapshot} from './types'
+import type {Agent,Device,FaceGesture,FaceState,Frame,PlaybackStatus,PortraitStatus,Snapshot} from './types'
 
 declare const __PIXOO_HAS_LOCAL_PREVIEW__:boolean
 
@@ -26,7 +26,7 @@ export async function listAgents(){return harness?agents:json<Agent[]>('/agents'
 export async function listDevices(){return harness?devices:json<Device[]>('/devices')}
 export async function portraitStatus(agentId:string){
   if(!harness)return json<PortraitStatus>(`/portrait/status?agentId=${encodeURIComponent(agentId)}`)
-  return {agentId,state:'ready',updatedAt:new Date().toISOString(),clips:(['resting','speaking','listening','thinking','dreaming'] as FaceState[]).map(state=>({state,phase:'ready',attempts:1,updatedAt:new Date().toISOString()}))}
+  return {agentId,state:'ready',updatedAt:new Date().toISOString(),clips:(['resting-breathe-blink','speaking','listening','thinking','dreaming'] as const).map(key=>({key,state:key.startsWith('resting')?'resting':key as FaceState,phase:'ready',attempts:1,updatedAt:new Date().toISOString()}))}
 }
 export async function current(deviceId:string){
   if(!harness)return json<Snapshot>(`/emulator?deviceId=${encodeURIComponent(deviceId)}`)
@@ -36,6 +36,10 @@ export async function current(deviceId:string){
   const next={...snapshot,frames:preview?.[snapshot.state]??snapshot.frames}
   snapshots.set(deviceId,next)
   return next
+}
+export async function playback(deviceId:string){
+  if(harness)return (snapshots.get(deviceId)?.playback??{}) as PlaybackStatus
+  return json<PlaybackStatus>('/devices/'+deviceId+'/playback')
 }
 export async function updateDevice(value:Device){
   if(harness){
@@ -65,7 +69,7 @@ export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGest
     if(!device)throw new Error('Display not found')
     const previous=snapshots.get(deviceId)??makeSnapshot(device)
     const frames=gesture?render(state,device.agentColor,device.brightness,gesture):preview?.[state]??render(state,device.agentColor,device.brightness)
-    const snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...previous.history].slice(0,8)}
+    const snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...previous.history].slice(0,8),playback:{playingGif:state+'-preview'}}
     snapshots.set(deviceId,snapshot)
     return snapshot
   }
@@ -73,7 +77,7 @@ export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGest
 }
 
 function makeSnapshot(device:Device):Snapshot{
-  return {device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}]}
+  return {device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}],playback:{playingGif:'resting-1'}}
 }
 
 async function loadPreview(){

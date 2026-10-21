@@ -54,30 +54,46 @@ public sealed record FrameLoop(IReadOnlyList<RgbFrame> Frames)
 
 public enum DisplayPlaybackMode
 {
-    Held,
     Continuous,
     OneShot,
 }
 
 /// <summary>
-/// Separates the portrait that should remain on the display from an optional motion loop.
-/// Held programs are replayed by the server; continuous programs are left looping on-device.
+/// A complete state animation plus optional infrequently rotated alternatives.
+/// Any pauses are duplicate frames inside the loop, never server-timed re-uploads.
 /// </summary>
-public sealed record DisplayProgram(FrameLoop Still, FrameLoop? Motion, DisplayPlaybackMode Mode)
+public sealed record DisplayProgram(
+    FrameLoop Still,
+    FrameLoop? Motion,
+    DisplayPlaybackMode Mode,
+    IReadOnlyList<FrameLoop>? Alternatives = null)
 {
-    public FrameLoop InitialLoop => Mode == DisplayPlaybackMode.Held || Motion is null ? Still : Motion;
+    public FrameLoop InitialLoop => Motion ?? Still;
 
     public DisplayProgram Validate()
     {
         Still.Validate();
         Motion?.Validate();
+        if (Alternatives is not null) foreach (var alternative in Alternatives) alternative.Validate();
         return this;
     }
 }
 
-public sealed record DisplayPush(FrameLoop Loop, FaceState State, FaceGesture? Gesture, string Cause, DateTimeOffset CreatedAt);
+public sealed record DisplayPush(
+    FrameLoop Loop,
+    FaceState State,
+    FaceGesture? Gesture,
+    string Cause,
+    DateTimeOffset CreatedAt,
+    string AnimationName);
 
 public sealed record PushReceipt(DateTimeOffset PushedAt, FaceState State, FaceGesture? Gesture, string Cause, int FrameCount);
+
+public sealed record DisplayPlaybackStatus(
+    string? PlayingGif,
+    DateTimeOffset? LastFetchedAt,
+    string? LastFetchedFrom,
+    string? DeliveryError);
 
 public sealed record PixooDevice(
     Guid Id,
@@ -95,4 +111,5 @@ public sealed record DeviceSnapshot(
     FaceState State,
     FaceGesture? Gesture,
     IReadOnlyList<RgbFrame> Frames,
-    IReadOnlyList<PushReceipt> History);
+    IReadOnlyList<PushReceipt> History,
+    DisplayPlaybackStatus Playback);

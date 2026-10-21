@@ -18,15 +18,12 @@ public sealed class PortraitFaceRenderer(IPortraitPackCache packs, ProceduralFac
 
 public static class PortraitLoopRenderer
 {
-    private static readonly HashSet<FaceState> HeldStates =
-        [FaceState.Resting, FaceState.Listening, FaceState.Thinking, FaceState.Dreaming, FaceState.Asleep];
-
     public static DisplayProgram Render(PortraitPack pack, FaceState state, int brightness, FaceGesture? gesture = null)
     {
         if (state == FaceState.Dark)
         {
             var dark = new FrameLoop([new RgbFrame(new byte[RgbFrame.ByteCount], 900)]).Validate();
-            return new(dark, null, DisplayPlaybackMode.Held);
+            return new(dark, null, DisplayPlaybackMode.Continuous);
         }
 
         var clipState = gesture is not null ? FaceState.Resting : state switch
@@ -37,15 +34,26 @@ public static class PortraitLoopRenderer
         };
         var dim = state == FaceState.Asleep ? .35 : 1d;
         var level = Math.Clamp(brightness, 0, 100) / 100d * dim;
-        var still = new FrameLoop([new RgbFrame(Scale(pack.BasePixels, level), 1000)]).Validate();
-        if (!pack.Clips.TryGetValue(clipState, out var clip)) return new(still, null, DisplayPlaybackMode.Held);
-        var motion = new FrameLoop(clip.Loop.Frames
-            .Select(frame => new RgbFrame(Scale(frame.Pixels, level), frame.DurationMs))
-            .ToArray()).Validate();
-        var mode = gesture is not null
-            ? DisplayPlaybackMode.OneShot
-            : HeldStates.Contains(state) ? DisplayPlaybackMode.Held : DisplayPlaybackMode.Continuous;
-        return new DisplayProgram(still, motion, mode).Validate();
+        var still = new FrameLoop([new RgbFrame(Scale(pack.BasePixels, level), 100)]).Validate();
+        if (state == FaceState.Resting && gesture is null)
+        {
+            var idle = pack.IdleVariants().Select(clip => Scale(clip.Loop, level)).ToArray();
+            var composites = PortraitCompositeBuilder.BuildResting(still.Frames[0].Pixels, idle, pack.Provenance.SourceHash);
+            return new DisplayProgram(still, composites[0], DisplayPlaybackMode.Continuous,
+                composites.Skip(1).Concat(composites.Take(1)).ToArray()).Validate();
+        }
+
+        var clip = pack.Primary(clipState);
+        if (clip is null) return new(still, null, DisplayPlaybackMode.Continuous);
+        var motion = Scale(clip.Loop, level);
+        var loop = state switch
+        {
+            FaceState.Listening => PortraitCompositeBuilder.WithPause(still.Frames[0].Pixels, motion, TimeSpan.FromSeconds(2)),
+            FaceState.Thinking or FaceState.Working => PortraitCompositeBuilder.WithPause(still.Frames[0].Pixels, motion, TimeSpan.FromSeconds(3)),
+            FaceState.Dreaming or FaceState.Asleep => PortraitCompositeBuilder.Repeat(motion, TimeSpan.FromSeconds(60)),
+            _ => motion,
+        };
+        return new DisplayProgram(still, loop, gesture is null ? DisplayPlaybackMode.Continuous : DisplayPlaybackMode.OneShot).Validate();
     }
 
     private static byte[] Scale(byte[] pixels, double factor)
@@ -55,4 +63,7 @@ public static class PortraitLoopRenderer
             result[index] = (byte)Math.Clamp(Math.Round(pixels[index] * factor), 0, 255);
         return result;
     }
+
+    private static FrameLoop Scale(FrameLoop loop, double factor)
+        => new FrameLoop(loop.Frames.Select(frame => new RgbFrame(Scale(frame.Pixels, factor), 100)).ToArray()).Validate();
 }

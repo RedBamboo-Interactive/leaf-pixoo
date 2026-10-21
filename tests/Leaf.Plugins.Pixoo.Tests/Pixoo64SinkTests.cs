@@ -9,12 +9,11 @@ public sealed class Pixoo64SinkTests
     public async Task Sink_sends_buffered_bodies_with_content_length_never_chunked()
     {
         var handler = new FakePixoo();
-        var sink = new Pixoo64Sink(new HttpClient(handler));
+        var sink = Sink(handler);
 
         await sink.PushAsync(Device(), Push(frames: 3));
 
-        Assert.Equal(["Draw/ResetHttpGifId", "Draw/SendHttpGif", "Draw/SendHttpGif", "Draw/SendHttpGif",
-            "Channel/SetBrightness", "Channel/OnOffScreen"], handler.Commands);
+        Assert.Equal(["Channel/SetBrightness", "Device/PlayTFGif", "Channel/OnOffScreen"], handler.Commands);
         Assert.All(handler.Requests, request =>
         {
             Assert.NotEqual(true, request.Chunked);
@@ -26,10 +25,10 @@ public sealed class Pixoo64SinkTests
     public async Task Sink_fails_when_device_rejects_a_command_despite_http_200()
     {
         var handler = new FakePixoo { Reply = """{"error_code": "Request data illegal json"}""" };
-        var sink = new Pixoo64Sink(new HttpClient(handler));
+        var sink = Sink(handler);
 
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => sink.PushAsync(Device(), Push(frames: 1)));
-        Assert.Contains("Draw/ResetHttpGifId", error.Message);
+        Assert.Contains("Channel/SetBrightness", error.Message);
     }
 
     [Theory]
@@ -54,12 +53,31 @@ public sealed class Pixoo64SinkTests
         Assert.Equal(2, sink.Calls);
     }
 
+    [Fact]
+    public async Task Missing_device_fetch_falls_back_to_at_most_forty_frames_and_surfaces_status()
+    {
+        var handler = new FakePixoo();
+        var statuses = new DisplayPlaybackStatusStore();
+        var sink = Sink(handler, fetched: false, statuses: statuses);
+        var device = Device();
+
+        await sink.PushAsync(device, Push(frames: 60));
+
+        Assert.Equal(40, handler.Commands.Count(command => command == "Draw/SendHttpGif"));
+        Assert.Contains("firewall rule", statuses.Get(device.Id).DeliveryError, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("frame fallback", statuses.Get(device.Id).PlayingGif);
+    }
+
     private static PixooDevice Device() =>
         new(Guid.NewGuid(), "test", DeviceKind.Pixoo64, "192.0.2.10", 80, Guid.NewGuid(), "#44ccaa", 1000, HardwareEnabled: true);
 
     private static DisplayPush Push(int frames) => new(
         new(Enumerable.Range(0, frames).Select(_ => new RgbFrame(new byte[RgbFrame.ByteCount], 100)).ToArray()),
-        FaceState.Resting, null, "test", DateTimeOffset.UtcNow);
+        FaceState.Resting, null, "test", DateTimeOffset.UtcNow, "resting-1");
+
+    private static Pixoo64Sink Sink(FakePixoo handler, bool fetched = true, DisplayPlaybackStatusStore? statuses = null)
+        => new(new HttpClient(handler), new FakeGifHost(fetched), new FakeGifEncoder(),
+            statuses ?? new(), new() { FetchTimeout = TimeSpan.FromMilliseconds(10) });
 
     private sealed record SeenRequest(string Command, bool? Chunked, long? ContentLength, long BodyLength);
 
@@ -84,6 +102,21 @@ public sealed class Pixoo64SinkTests
 
         public Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
             => ++Calls == 1 ? throw new InvalidOperationException("boom") : Task.CompletedTask;
+    }
+
+    private sealed class FakeGifEncoder : IGifEncoder
+    {
+        public Task<byte[]> EncodeAsync(FrameLoop loop, int frameDurationMs, CancellationToken ct = default)
+            => Task.FromResult<byte[]>([71, 73, 70, 56, 57, 97]);
+    }
+
+    private sealed class FakeGifHost(bool fetched) : ILanGifHost
+    {
+        public Task<GifPublication> PublishAsync(PixooDevice device, string animationName, byte[] gif, CancellationToken ct)
+            => Task.FromResult(new GifPublication("http://192.0.2.1:18950/token/resting.gif", "resting.gif", DateTimeOffset.UtcNow));
+
+        public Task<GifFetch?> WaitForFetchAsync(GifPublication publication, TimeSpan timeout, CancellationToken ct)
+            => Task.FromResult<GifFetch?>(fetched ? new(DateTimeOffset.UtcNow, "192.0.2.10") : null);
     }
 }
 

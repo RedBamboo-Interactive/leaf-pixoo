@@ -11,7 +11,9 @@ using Leaf.Sdk.Services;
 namespace Leaf.Plugins.Pixoo;
 
 public sealed record PortraitClipStatus(
+    string Key,
     FaceState State,
+    string? Variant,
     string Phase,
     int Attempts,
     string? JobId,
@@ -48,7 +50,7 @@ public sealed class PortraitPackService(
     private readonly ConcurrentDictionary<Guid, PortraitPack> current = new();
     private readonly AgentSingleFlight<PortraitPack?> builds = new();
     private readonly ConcurrentDictionary<Guid, PortraitPackStatus> statuses = new();
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<FaceState, PortraitClipStatus>> clipStatuses = new();
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, PortraitClipStatus>> clipStatuses = new();
     private readonly ConcurrentDictionary<Guid, DateTimeOffset> failedAt = new();
     public event Func<Guid, Task>? PackReady;
 
@@ -161,50 +163,50 @@ public sealed class PortraitPackService(
                 $"pixoo:{PortraitPackBuilder.PipelineVersion}:{inputKind}:{source.Hash}",
                 $"pixoo-{agentId:N}-{inputKind}.png", "image/png", ct);
             var failures = new List<string>();
-            await PortraitClipPlan.ExecuteAsync(async (state, attempt, token) =>
+            await PortraitClipPlan.ExecuteAsync(async (spec, attempt, token) =>
             {
-                if (!force && pack.Clips.ContainsKey(state))
+                if (!force && pack.Clips.ContainsKey(spec.Key))
                 {
-                    SetClip(agentId, state, "ready", 0, pack.Clips[state].Provenance.JobId,
-                        pack.Clips[state].Provenance.Note);
+                    SetClip(agentId, spec, "ready", 0, pack.Clips[spec.Key].Provenance.JobId,
+                        pack.Clips[spec.Key].Provenance.Note);
                     return true;
                 }
-                var seed = SeedFor(source.Hash, state, attempt);
+                var seed = SeedFor(source.Hash, spec.Key, attempt);
                 string? admittedJobId = null;
-                SetClip(agentId, state, fastWorkflow.Template is null ? "generating-slow-fallback" : "generating",
+                SetClip(agentId, spec, fastWorkflow.Template is null ? "generating-slow-fallback" : "generating",
                     attempt, null, fallbackReason);
                 try
                 {
-                    var prompt = PortraitClipPrompts.For(state, source.OutfitDescription);
-                    var generated = await GenerateClipAsync(agentId, source, state, prompt, inputAsset.Url, seed,
+                    var prompt = PortraitClipPrompts.For(spec, source.OutfitDescription);
+                    var generated = await GenerateClipAsync(agentId, source, spec, prompt, inputAsset.Url, seed,
                         fastWorkflow.Template, fallbackReason,
                         jobId =>
                         {
                             admittedJobId = jobId;
-                            SetClip(agentId, state,
+                            SetClip(agentId, spec,
                                 fastWorkflow.Template is null ? "generating-slow-fallback" : "generating",
                                 attempt, jobId, fallbackReason);
                         }, token);
-                    SetClip(agentId, state, "processing", attempt, generated.JobId, generated.Note);
+                    SetClip(agentId, spec, "processing", attempt, generated.JobId, generated.Note);
                     var decoded = await decoder.DecodeAsync(generated.Bytes, generated.Width, generated.Height, token);
                     var loop = generated.Fast
-                        ? PortraitClipProcessor.BuildMotionLoop(decoded, settings)
+                        ? PortraitClipProcessor.BuildMotionLoop(decoded, settings, pack.BasePixels)
                         : PortraitClipProcessor.BuildMotionLoop(decoded, settings.SlowWidth, settings.SlowHeight,
                             slowGeometry!.OutputSquare, settings.SlowSampleStride,
-                            settings.SlowFrameDurationMs, settings.MaximumLoopFrames);
-                    var clip = await StoreClipAsync(source, state, prompt, seed, generated, loop, token);
+                            settings.SlowFrameDurationMs, settings.MaximumLoopFrames, pack.BasePixels);
+                    var clip = await StoreClipAsync(source, spec, prompt, seed, generated, loop, token);
                     pack = pack.WithClip(clip);
                     entityId = await StoreEntityAsync(source, prepared, pack, entityId, token);
-                    SetClip(agentId, state, "ready", attempt, generated.JobId, generated.Note);
+                    SetClip(agentId, spec, "ready", attempt, generated.JobId, generated.Note);
                     await ActivateAsync(agentId, pack);
                     return true;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     var message = Compact(ex.Message, 400);
-                    SetClip(agentId, state, attempt == settings.MaximumAttemptsPerClip ? "failed" : "cooldown",
+                    SetClip(agentId, spec, attempt == settings.MaximumAttemptsPerClip ? "failed" : "cooldown",
                         attempt, admittedJobId, message);
-                    if (attempt == settings.MaximumAttemptsPerClip) failures.Add($"{Slug(state)}: {message}");
+                    if (attempt == settings.MaximumAttemptsPerClip) failures.Add($"{spec.Key}: {message}");
                     return false;
                 }
             }, settings, ct);
@@ -264,17 +266,17 @@ public sealed class PortraitPackService(
         }
     }
 
-    private async Task<GeneratedVideo> GenerateClipAsync(Guid agentId, SourcePortrait source, FaceState state,
+    private async Task<GeneratedVideo> GenerateClipAsync(Guid agentId, SourcePortrait source, PortraitClipSpec spec,
         PortraitClipPrompt prompt, string imageAssetUrl, long seed, FastPortraitWorkflowTemplate? fastWorkflow,
         string? fallbackReason, Action<string> admitted, CancellationToken ct)
     {
         var token = RequireExecutionTokens().IssueSystem(new PluginSystemExecutionTokenRequest(
-            "plugin", PixooPlugin.Id, "Leaf Pixoo", $"Generate the selected Agent's {Slug(state)} display loop",
+            "plugin", PixooPlugin.Id, "Leaf Pixoo", $"Generate the selected Agent's {spec.Key} display loop",
             [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], ExecutionTokenLifetime));
         var imageUrl = LeafAssetUrl(imageAssetUrl);
         if (fastWorkflow is not null)
         {
-            var body = fastWorkflow.CreateSubmission(prompt, imageUrl, seed, state, source.Hash);
+            var body = fastWorkflow.CreateSubmission(prompt, imageUrl, seed, spec.State, source.Hash);
             using var request = new HttpRequestMessage(HttpMethod.Post, RawGenerateUrl)
             {
                 Content = JsonContent.Create(body),
@@ -282,9 +284,9 @@ public sealed class PortraitPackService(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
             request.Headers.TryAddWithoutValidation("X-Async", "true");
             request.Headers.TryAddWithoutValidation("X-Idempotency-Key",
-                $"pixoo:{PortraitPackBuilder.PipelineVersion}:{source.Hash}:{Slug(state)}:{seed}");
-            var jobId = await AdmitAsync(request, state, admitted, ct);
-            var bytes = await AwaitVideoAsync(jobId, state, token.AccessToken, ct);
+                $"pixoo:{PortraitPackBuilder.PipelineVersion}:{source.Hash}:{spec.Key}:{seed}");
+            var jobId = await AdmitAsync(request, spec.State, admitted, ct);
+            var bytes = await AwaitVideoAsync(jobId, spec.State, token.AccessToken, ct);
             return new(jobId, bytes, settings.Width, settings.Height, true,
                 FastPortraitWorkflowTemplate.Variant, null);
         }
@@ -308,9 +310,9 @@ public sealed class PortraitPackService(
         };
         slowRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.AccessToken);
         slowRequest.Headers.TryAddWithoutValidation("X-Idempotency-Key",
-            $"pixoo:{PortraitPackBuilder.PipelineVersion}:slow:{source.Hash}:{Slug(state)}:{seed}");
-        var slowJobId = await AdmitAsync(slowRequest, state, admitted, ct);
-        var slowBytes = await AwaitVideoAsync(slowJobId, state, token.AccessToken, ct);
+            $"pixoo:{PortraitPackBuilder.PipelineVersion}:slow:{source.Hash}:{spec.Key}:{seed}");
+        var slowJobId = await AdmitAsync(slowRequest, spec.State, admitted, ct);
+        var slowBytes = await AwaitVideoAsync(slowJobId, spec.State, token.AccessToken, ct);
         return new(slowJobId, slowBytes, settings.SlowWidth, settings.SlowHeight, false, Workflow, fallbackReason);
     }
 
@@ -374,17 +376,17 @@ public sealed class PortraitPackService(
         return new(entity.Id, pack);
     }
 
-    private async Task<PortraitClip> StoreClipAsync(SourcePortrait source, FaceState state, PortraitClipPrompt prompt,
+    private async Task<PortraitClip> StoreClipAsync(SourcePortrait source, PortraitClipSpec spec, PortraitClipPrompt prompt,
         long seed, GeneratedVideo generated, FrameLoop loop, CancellationToken ct)
     {
-        var stem = $"pixoo:{PortraitPackBuilder.PipelineVersion}:{source.Hash}:{Slug(state)}:{seed}";
+        var stem = $"pixoo:{PortraitPackBuilder.PipelineVersion}:{source.Hash}:{spec.Key}:{seed}";
         await using var videoStream = new MemoryStream(generated.Bytes, writable: false);
         await using var loopStream = new MemoryStream(EncodeLoop(loop), writable: false);
         var video = await assets.UploadIdempotentAsync(videoStream, $"{stem}:video",
-            $"pixoo-{Slug(state)}.mp4", "video/mp4", ct);
+            $"pixoo-{spec.Key}.mp4", "video/mp4", ct);
         var reduced = await assets.UploadIdempotentAsync(loopStream, $"{stem}:loop",
-            $"pixoo-{Slug(state)}-64x64.json", "application/json", ct);
-        return new(loop, new(state, generated.Workflow, seed, generated.JobId, video.AssetId, reduced.AssetId,
+            $"pixoo-{spec.Key}-64x64.json", "application/json", ct);
+        return new(loop, new(spec.Key, spec.State, generated.Workflow, seed, generated.JobId, video.AssetId, reduced.AssetId,
             prompt.Prompt, prompt.Negative, generated.Note, DateTimeOffset.UtcNow));
     }
 
@@ -411,11 +413,12 @@ public sealed class PortraitPackService(
         string cropAssetId, string baseAssetId)
     {
         var clips = new JsonObject();
-        foreach (var (state, clip) in pack.Clips)
+        foreach (var (key, clip) in pack.Clips)
         {
             var provenance = clip.Provenance;
-            clips[Slug(state)] = new JsonObject
+            clips[key] = new JsonObject
             {
+                ["state"] = Slug(provenance.State),
                 ["workflow"] = provenance.Workflow,
                 ["seed"] = provenance.Seed,
                 ["job_id"] = provenance.JobId,
@@ -462,16 +465,16 @@ public sealed class PortraitPackService(
                 if (baseId is null) continue;
                 var baseFile = await assets.ReadAsync(baseId, ct);
                 if (baseFile is null) continue;
-                var clips = new Dictionary<FaceState, PortraitClip>();
+                var clips = new Dictionary<string, PortraitClip>();
                 if (entity.Data["clips"] is JsonObject storedClips)
                 {
-                    foreach (var state in PortraitClipPlan.GenerationOrder)
+                    foreach (var spec in PortraitClipPlan.Specs)
                     {
-                        if (storedClips[Slug(state)] is not JsonObject value) continue;
+                        if (storedClips[spec.Key] is not JsonObject value) continue;
                         var loopId = Text(value, "loop_asset");
                         if (loopId is null || await assets.ReadAsync(loopId, ct) is not { } loopFile) continue;
                         var loop = DecodeLoop(loopFile.Bytes);
-                        clips[state] = new(loop, new(state,
+                        clips[spec.Key] = new(loop, new(spec.Key, spec.State,
                             Text(value, "workflow") ?? Workflow,
                             value["seed"]?.GetValue<long>() ?? 0,
                             Text(value, "job_id") ?? "cached",
@@ -524,28 +527,29 @@ public sealed class PortraitPackService(
     private void SetOverall(Guid agentId, string state, string? sourceAssetId, string? sourceHash, string? error)
         => statuses[agentId] = new(agentId, state, sourceAssetId, sourceHash, error, DateTimeOffset.UtcNow, []);
 
-    private void SetClip(Guid agentId, FaceState state, string phase, int attempts, string? jobId, string? error)
+    private void SetClip(Guid agentId, PortraitClipSpec spec, string phase, int attempts, string? jobId, string? error)
     {
         var values = clipStatuses.GetOrAdd(agentId, _ => new());
-        values[state] = new(state, phase, attempts, jobId, error, DateTimeOffset.UtcNow);
+        values[spec.Key] = new(spec.Key, spec.State, spec.Variant, phase, attempts, jobId, error, DateTimeOffset.UtcNow);
     }
 
     private IReadOnlyList<PortraitClipStatus> ClipSnapshot(Guid agentId)
     {
         var values = clipStatuses.GetValueOrDefault(agentId);
-        return PortraitClipPlan.GenerationOrder.Select(state => values?.GetValueOrDefault(state)
-            ?? new(state, current.GetValueOrDefault(agentId)?.Clips.ContainsKey(state) == true ? "ready" : "pending",
-                0, current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(state)?.Provenance.JobId,
-                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(state)?.Provenance.Note,
+        return PortraitClipPlan.Specs.Select(spec => values?.GetValueOrDefault(spec.Key)
+            ?? new(spec.Key, spec.State, spec.Variant,
+                current.GetValueOrDefault(agentId)?.Clips.ContainsKey(spec.Key) == true ? "ready" : "pending",
+                0, current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.JobId,
+                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.Note,
                 DateTimeOffset.UtcNow)).ToArray();
     }
 
     private static bool HasAllPrimaryClips(PortraitPack pack)
-        => PortraitClipPlan.GenerationOrder.All(pack.Clips.ContainsKey);
+        => PortraitClipPlan.Specs.All(spec => pack.Clips.ContainsKey(spec.Key));
 
-    private static long SeedFor(string hash, FaceState state, int attempt)
+    private static long SeedFor(string hash, string key, int attempt)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{hash}:{Slug(state)}:{attempt}"));
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes($"{hash}:{key}:{attempt}"));
         return (long)(BinaryPrimitives.ReadUInt64LittleEndian(bytes) % int.MaxValue) + 1;
     }
 

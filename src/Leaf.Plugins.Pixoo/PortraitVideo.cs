@@ -12,42 +12,17 @@ public sealed record PortraitClipSettings
     public int SamplerSplit { get; init; } = 2;
     public int OutputFps { get; init; } = 15;
     public int SampleStride { get; init; } = 2;
-    public int FrameDurationMs { get; init; } = 128;
+    public int FrameDurationMs { get; init; } = 100;
     public int MaximumLoopFrames { get; init; } = 30;
     public int SlowWidth { get; init; } = 768;
     public int SlowHeight { get; init; } = 576;
     public int SlowSteps { get; init; } = 30;
     public int SlowInterpolationMultiplier { get; init; } = 2;
     public int SlowSampleStride { get; init; } = 4;
-    public int SlowFrameDurationMs { get; init; } = 133;
+    public int SlowFrameDurationMs { get; init; } = 100;
     public int MaximumAttemptsPerClip { get; init; } = 2;
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
-    public TimeSpan MotionPlaybackMargin { get; init; } = TimeSpan.FromMilliseconds(500);
-    public IReadOnlyDictionary<FaceState, MotionReplayRange> ReplayGaps { get; init; } =
-        new Dictionary<FaceState, MotionReplayRange>
-        {
-            [FaceState.Resting] = MotionReplayRange.Default,
-            [FaceState.Listening] = MotionReplayRange.Default,
-            [FaceState.Thinking] = MotionReplayRange.Default,
-            [FaceState.Dreaming] = MotionReplayRange.Default,
-            [FaceState.Asleep] = MotionReplayRange.Default,
-        };
-
-    public MotionReplayRange? ReplayGapFor(FaceState state)
-        => ReplayGaps.TryGetValue(state, out var range) ? range.Validate() : null;
-}
-
-public sealed record MotionReplayRange(TimeSpan Minimum, TimeSpan Maximum)
-{
-    public static MotionReplayRange Default { get; } = new(TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
-
-    public MotionReplayRange Validate()
-    {
-        if (Minimum <= TimeSpan.Zero || Maximum < Minimum)
-            throw new ArgumentOutOfRangeException(nameof(Minimum), "Motion replay gaps need a positive minimum no greater than the maximum.");
-        return this;
-    }
 }
 
 public sealed record DecodedVideoFrame(byte[] Pixels, int Width, int Height);
@@ -141,28 +116,30 @@ public sealed class FfmpegVideoFrameDecoder : IVideoFrameDecoder
 
 public static class PortraitClipProcessor
 {
-    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, PortraitClipSettings settings)
+    public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, PortraitClipSettings settings,
+        byte[]? referenceStill = null)
         => BuildMotionLoop(decoded, settings.Width, settings.Height,
             new ImageRect(0, 0, settings.Width, settings.Height), settings.SampleStride,
-            settings.FrameDurationMs, settings.MaximumLoopFrames);
+            settings.FrameDurationMs, settings.MaximumLoopFrames, referenceStill);
 
     public static FrameLoop BuildMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded, int width, int height,
-        ImageRect crop, int sampleStride, int frameDurationMs, int maximumFrames)
+        ImageRect crop, int sampleStride, int frameDurationMs, int maximumFrames, byte[]? referenceStill = null)
     {
         if (decoded.Count < 2) throw new InvalidDataException("A loop needs at least two video frames so the duplicate closing frame can be dropped.");
-        var frames = SampleIndices(decoded.Count, sampleStride, maximumFrames)
+        var pixels = SampleIndices(decoded.Count, sampleStride, maximumFrames)
             .Select(index =>
             {
                 var frame = decoded[index];
                 if (frame.Width != width || frame.Height != height)
                     throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {width}x{height}.");
-                var pixels = PortraitPackBuilder.BoxDownsampleRgb(frame.Pixels, frame.Width, frame.Height, crop);
-                return new RgbFrame(pixels, frameDurationMs);
+                return PortraitPackBuilder.BoxDownsampleRgb(frame.Pixels, frame.Width, frame.Height, crop);
             }).ToArray();
+        if (referenceStill is not null) pixels = PortraitColorCorrector.Correct(pixels, referenceStill).ToArray();
+        var frames = pixels.Select(frame => new RgbFrame(frame, frameDurationMs)).ToArray();
         return new FrameLoop(frames).Validate();
     }
 
-    public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 1000)
+    public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 100)
         => new FrameLoop([new RgbFrame(pixels.ToArray(), durationMs)]).Validate();
 
     internal static int[] SampleIndices(int frameCount, int stride, int maximumFrames)
@@ -184,19 +161,25 @@ public static class PortraitClipPrompts
     private const string Negative = "exaggerated expression, head turning away, camera movement, zoom, pan, cut, morphing face, identity change, outfit change, extra fingers, flicker, text, watermark";
 
     public static PortraitClipPrompt For(FaceState state, string? outfitDescription)
+        => For(new PortraitClipSpec(PortraitClipPlan.PrimaryKey(state), state, null), outfitDescription);
+
+    public static PortraitClipPrompt For(PortraitClipSpec spec, string? outfitDescription)
     {
-        var motion = state switch
+        var motion = spec.Key switch
         {
-            FaceState.Resting => "The subject is resting and present. Slow natural breathing, shoulders rising and falling gently, one natural blink, gaze soft and direct.",
-            FaceState.Speaking => "The subject speaks naturally with readable conversational lip and jaw movement and a small, restrained head motion. No exaggerated expression.",
-            FaceState.Listening => "The subject listens attentively with a small natural nod, steady expression, and closed mouth.",
-            FaceState.Thinking => "The subject thinks quietly; the eyes drift slightly aside or upward, then return to the starting gaze.",
-            FaceState.Dreaming => "The subject's eyes close naturally, remain closed through the middle while slow calm breathing continues, then return gently to the starting gaze.",
-            _ => throw new ArgumentOutOfRangeException(nameof(state), "Only primary generated clip states have prompts."),
+            "resting-look-down" => "The subject rests quietly, looks down softly for a moment, then returns to the exact starting gaze.",
+            "resting-glance-aside" => "The subject rests quietly, glances slightly toward the existing scene, then returns to the exact starting gaze.",
+            "resting-private-smile" => "The subject rests quietly and gives one small private closed-mouth smile, then returns to the exact starting expression.",
+            "resting-breathe-blink" => "The subject rests quietly with slow natural breathing and one natural blink, then returns to the exact starting gaze.",
+            "speaking" => "The subject speaks naturally with readable conversational lip and jaw movement and a small, restrained head motion. No exaggerated expression.",
+            "listening" => "The subject listens attentively with a small natural nod, steady expression, and closed mouth.",
+            "thinking" => "The subject thinks quietly; the eyes drift slightly aside or upward, then return to the starting gaze.",
+            "dreaming" => "The subject's eyes close naturally and remain closed while slow calm breathing continues.",
+            _ => throw new ArgumentOutOfRangeException(nameof(spec), "Unknown portrait clip specification."),
         };
         var scene = ScenePhrase(outfitDescription);
         var prompt = $"Use the reference image as the exact identity, outfit, scene, pose, and framing. {scene}{motion} The action ends exactly in the starting pose. Static locked-off camera, steady framing, natural light, seamless closed loop.";
-        var stateNegative = state switch
+        var stateNegative = spec.State switch
         {
             FaceState.Resting or FaceState.Listening or FaceState.Thinking or FaceState.Dreaming
                 => "talking, speaking, mouth opening, singing, big smile, laughing, " + Negative,
@@ -217,23 +200,42 @@ public static class PortraitClipPrompts
 
 internal static class PortraitClipPlan
 {
-    public static readonly FaceState[] GenerationOrder =
-        [FaceState.Resting, FaceState.Speaking, FaceState.Listening, FaceState.Thinking, FaceState.Dreaming];
+    public static readonly PortraitClipSpec[] Specs =
+    [
+        new("resting-look-down", FaceState.Resting, "look down"),
+        new("resting-glance-aside", FaceState.Resting, "glance aside"),
+        new("resting-private-smile", FaceState.Resting, "private smile"),
+        new("resting-breathe-blink", FaceState.Resting, "breath and blink"),
+        new("speaking", FaceState.Speaking, null),
+        new("listening", FaceState.Listening, null),
+        new("thinking", FaceState.Thinking, null),
+        new("dreaming", FaceState.Dreaming, null),
+    ];
 
-    public static async Task ExecuteAsync(Func<FaceState, int, CancellationToken, Task<bool>> attempt,
+    public static string PrimaryKey(FaceState state) => state switch
+    {
+        FaceState.Resting => "resting-breathe-blink",
+        FaceState.Working => "thinking",
+        FaceState.Asleep => "dreaming",
+        _ => state.ToString().ToLowerInvariant(),
+    };
+
+    public static async Task ExecuteAsync(Func<PortraitClipSpec, int, CancellationToken, Task<bool>> attempt,
         PortraitClipSettings settings, CancellationToken ct)
     {
-        foreach (var state in GenerationOrder)
+        foreach (var spec in Specs)
         {
             for (var number = 1; number <= settings.MaximumAttemptsPerClip; number++)
             {
-                if (await attempt(state, number, ct)) break;
+                if (await attempt(spec, number, ct)) break;
                 if (number < settings.MaximumAttemptsPerClip && settings.RetryCooldown > TimeSpan.Zero)
                     await Task.Delay(settings.RetryCooldown, ct);
             }
         }
     }
 }
+
+public sealed record PortraitClipSpec(string Key, FaceState State, string? Variant);
 
 internal sealed class AgentSingleFlight<T>
 {

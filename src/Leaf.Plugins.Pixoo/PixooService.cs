@@ -11,9 +11,11 @@ public sealed class PixooService(
     EmulatorSink emulator,
     Pixoo64Sink hardware,
     IPushClock clock,
-    MotionReplayScheduler motionReplays,
+    AnimationRotationScheduler rotations,
     IAgentEventMapper mapper,
-    PortraitPackService portraits)
+    PortraitPackService portraits,
+    DisplayPlaybackStatusStore playback,
+    PixooPlaybackSettings playbackSettings)
 {
     public const string DeviceEntityType = "pixoo-device";
     private readonly ConcurrentDictionary<Guid, FaceStateMachine> states = new();
@@ -46,10 +48,23 @@ public sealed class PixooService(
         if (device is null) return null;
         portraits.Schedule(device.AgentId);
         var snapshot = emulator.Snapshot(device);
-        if (snapshot.Frames.Count > 0) return snapshot;
+        var delivery = playback.Get(device.Id);
+        if (queues.TryGetValue(device.Id, out var queued) && queued.Queue.LastError is { } queueError)
+            delivery = delivery with { DeliveryError = delivery.DeliveryError ?? queueError };
+        if (snapshot.Frames.Count > 0) return snapshot with { Playback = delivery };
         var state = states.GetOrAdd(device.Id, _ => new());
         var program = renderer.Render(device.AgentId, state.Current, device.AgentColor, device.Brightness, state.Gesture);
-        return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = program.InitialLoop.Frames };
+        return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = program.InitialLoop.Frames, Playback = delivery };
+    }
+
+    public async Task<DisplayPlaybackStatus> PlaybackAsync(PixooCaller caller, Guid deviceId, CancellationToken ct)
+    {
+        _ = (await DevicesAsync(caller, ct)).FirstOrDefault(device => device.Id == deviceId)
+            ?? throw new KeyNotFoundException("Pixoo device not found.");
+        var status = playback.Get(deviceId);
+        if (queues.TryGetValue(deviceId, out var queued) && queued.Queue.LastError is { } error)
+            status = status with { DeliveryError = status.DeliveryError ?? error };
+        return status;
     }
 
     public async Task<PixooDevice> CreateAsync(PixooCaller caller, DeviceChange request, CancellationToken ct)
@@ -58,7 +73,7 @@ public sealed class PixooService(
         var created = await entities.CreateAsync(DeviceEntityType, validated.Name, Encode(caller.UserId, validated), ct);
         var device = Decode(created);
         portraits.Schedule(device.AgentId);
-        await Push(device, FaceState.Resting, null, "device.created", ct);
+        await Push(device, AmbientStateSelector.Select(DateTimeOffset.Now, playbackSettings), null, "device.created", ct);
         return device;
     }
 
@@ -116,7 +131,20 @@ public sealed class PixooService(
         var all = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType, Limit = 100 }, ct);
         var devices = all.Select(Decode).ToArray();
         foreach (var agentId in devices.Select(device => device.AgentId).Distinct()) portraits.Schedule(agentId);
-        foreach (var device in devices) await Push(device, FaceState.Resting, null, "startup", ct);
+        var ambient = AmbientStateSelector.Select(DateTimeOffset.Now, playbackSettings);
+        foreach (var device in devices) await Push(device, ambient, null, "startup", ct);
+    }
+
+    public async Task ApplyAmbientStateAsync(FaceState ambient, CancellationToken ct)
+    {
+        var all = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType, Limit = 100 }, ct);
+        foreach (var device in all.Select(Decode))
+        {
+            var current = states.GetOrAdd(device.Id, _ => new()).Current;
+            if (current is FaceState.Listening or FaceState.Thinking or FaceState.Speaking or FaceState.Working or FaceState.Dark)
+                continue;
+            await Push(device, ambient, null, "time.window", ct);
+        }
     }
 
     public async Task RefreshPortraitAsync(Guid agentId)
@@ -144,11 +172,11 @@ public sealed class PixooService(
         if (queues.TryGetValue(device.Id, out var existing) && existing.Hardware != hardwareOutput
             && queues.TryRemove(device.Id, out var removed))
         {
-            motionReplays.Cancel(device.Id);
+            rotations.Cancel(device.Id);
             await removed.Queue.DisposeAsync();
         }
         var slot = queues.GetOrAdd(device.Id, _ => new(hardwareOutput, new(hardwareOutput ? hardware : emulator, clock)));
-        motionReplays.Replace(device, state, gesture, cause, program, slot.Queue);
+        rotations.Replace(device, state, gesture, cause, program, slot.Queue);
         if (gesture is not null) _ = CompleteGesture(device, state, gesture.Value, epoch, program.InitialLoop);
     }
 

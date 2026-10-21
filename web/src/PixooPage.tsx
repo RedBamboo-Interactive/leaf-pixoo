@@ -6,7 +6,7 @@ import {
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
-import {createDevice,current,listAgents,listDevices,portraitStatus,simulate,updateDevice} from './api'
+import {createDevice,current,listAgents,listDevices,playback,portraitStatus,simulate,updateDevice} from './api'
 import type {Agent,Device,FaceGesture,FaceState,PortraitStatus,Snapshot} from './types'
 import {LedMatrix} from './LedMatrix'
 
@@ -70,6 +70,14 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
     let alive=true
     void current(selected).then(snapshot=>{if(alive)setView(snapshot)}).catch(reason=>setError(message(reason)))
     return()=>{alive=false}
+  },[selected])
+
+  useEffect(()=>{
+    if(!selected)return
+    let alive=true
+    const refresh=()=>void playback(selected).then(status=>setView(value=>alive&&value?{...value,playback:status}:value)).catch(()=>{})
+    const timer=window.setInterval(refresh,5000)
+    return()=>{alive=false;window.clearInterval(timer)}
   },[selected])
 
   useEffect(()=>{
@@ -253,7 +261,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
             {portrait&&<div className="space-y-2">
               <div className="flex items-center justify-between gap-3"><Label>Portrait clips</Label><Badge variant="outline" className="capitalize">{portrait.state.replace('-', ' ')}</Badge></div>
               <div className="flex flex-wrap gap-1.5" aria-label="Portrait clip generation status">
-                {portrait.clips.map(clip=><Badge key={clip.state} variant={clip.phase==='ready'?'secondary':'outline'} className="capitalize">{clip.state} · {clip.phase}</Badge>)}
+                {portrait.clips.map(clip=><Badge key={clip.key??clip.state} variant={clip.phase==='ready'?'secondary':'outline'} className="capitalize">{(clip.key??clip.state).replaceAll('-',' ')} · {clip.phase}</Badge>)}
               </div>
             </div>}
 
@@ -261,6 +269,18 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
               <div className="flex items-center justify-between gap-3"><Label htmlFor="pixoo-brightness">Brightness</Label><output className="text-xs tabular-nums text-text-muted">{device.brightness}%</output></div>
               <Slider id="pixoo-brightness" aria-label="Brightness" min={0} max={100} value={[device.brightness]} onValueChange={value=>void save({brightness:Array.isArray(value)?value[0]??0:value})}/>
             </div>}
+
+            <div className="space-y-2 border-t border-border pt-4">
+              <div className="flex items-center justify-between gap-3">
+                <Label>Device playback</Label>
+                <Badge variant="outline">{view?.playback?.playingGif??'Not delivered'}</Badge>
+              </div>
+              {view?.playback?.lastFetchedAt&&<p className="text-xs text-text-muted">
+                Fetched {new Date(view.playback.lastFetchedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+                {view.playback.lastFetchedFrom?' from '+view.playback.lastFetchedFrom:''}
+              </p>}
+              {view?.playback?.deliveryError&&<p role="alert" className="rounded-md bg-destructive-a10 px-3 py-2 text-xs text-destructive">{view.playback.deliveryError}</p>}
+            </div>
           </CardContent>
         </Card>
 

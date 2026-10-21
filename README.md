@@ -12,7 +12,7 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - One-shot gestures: `arrive` and `react`.
 - Swappable `IFaceRenderer` whose primary renderer is a cached portrait pack from the bound Agent's current Outfit image (or avatar), with faithful BOX-reduced Wan video loops, a still portrait fallback, and finally the procedural face when no portrait exists.
 - `IDisplaySink` implementations for the in-memory emulator and an explicitly disabled-by-default Pixoo-64 HTTP driver.
-- One serialized latest-wins queue per device. A push is either a still frame or a complete multi-frame loop; changes arriving during the minimum gap coalesce to the newest state.
+- One serialized latest-wins queue per device. Each state change selects one complete GIF program; changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
 - RedLeaf design-system chrome from `@redbamboo/ui` with Tailwind v4 tokens in both light and dark themes. Only the physical LED matrix, glow, gaps, and bezel are bespoke.
 - A standalone Leaf surface at `/apps/pixoo/emulator`, including a device list, editable device name, canonical Agent `EntityCard` references, and a design-system Agent picker.
@@ -28,13 +28,15 @@ The renderer finds the same square bust crop used by the accepted faithful-B loo
 
 For animation, the same square bust crop is uploaded as a private Leaf Asset and used as both the first and last frame. At runtime Pixoo reads the registered `wan-22-i2v-first-last-portrait-film-60fps-4a256f5b` and `wan-video-22-quiet-reportage-film-60fps-88c61e77` workflow entities. It copies the six LightX2V LoRA nodes into a cloned first/last-frame graph, rewires the two samplers, removes FILM interpolation, and submits that frozen raw graph directly to RedCompute with the signed plugin execution identity and an idempotency key. No workflow graph is vendored in this repository.
 
-The fast graph runs at the measured motion floor: 384×384, 41 frames, four steps, sampler split two, CFG one, and 15 fps. The duplicate last frame is dropped, every second frame is retained, and every retained square receives the same BOX reduction to 64×64, producing 20 frames at 128 ms each. Motion loops remain capped at 30 frames. The exact durable job is polled and its declared output URL is downloaded; MP4 decoding uses `ffmpeg` from `PATH`.
+The fast graph runs at the measured motion floor: 384×384, 41 frames, four steps, sampler split two, CFG one, and 15 fps. The duplicate last frame is dropped, every second frame is retained, and every retained square receives the same BOX reduction to 64×64, producing 20 motion frames. A temporally smoothed Reinhard transfer in CIELAB matches every frame back to the source still, then the first and last four frames cross-fade to the exact still so the loop seam closes without a colour jump. The exact durable job is polled and its declared output URL is downloaded; MP4 decoding uses `ffmpeg` from `PATH`.
 
 If either workflow entity is absent or any required graph node cannot be rewired, Pixoo records the reason in each clip status and falls back to the registered workflow's previous 768×576, 30-step, FILM settings. Other generation failures fail soft to the faithful still and remain bounded by the normal attempt and cooldown policy.
 
-Resting, listening, thinking, dreaming, and asleep normally upload a single still frame. The server waits a random, per-state configurable interval (15–30 seconds by default), uploads the motion loop through the same paced queue, waits for one loop duration plus a 500 ms margin after that upload completes, then restores the still. A real state change cancels the pending replay; latest-wins coalescing remains authoritative if an upload is already in progress. Speaking leaves its motion clip looping continuously. The emulator uses this same scheduler and sink queue, rather than approximating the hardware timing in the browser. `PortraitClipSettings.ReplayGaps` and `MotionPlaybackMargin` hold these defaults; keeping still and motion loops distinct also leaves room for a later irregular-replay policy without rebuilding portrait packs.
+Every state is built as one uniform 100 ms/frame GIF program because the Pixoo ignores per-frame delays. Resting generates four scene-neutral idle variants (look down and back, glance toward the existing scene and back, a small private smile, and slow breathing with a blink). Three deterministic 60–120 second composites interleave those motions with source-hash-seeded 8–25 second runs of duplicate still frames. One composite is selected immediately and the alternatives rotate only every 10–20 minutes. Listening and thinking include short pauses, speaking loops continuously, dreaming is a long eyes-closed breathing program, and asleep reuses it with uniform dimming. The emulator receives the exact same frames and 100 ms timing as the GIF.
 
-Clips are generated in strict order: resting, speaking, listening, thinking, dreaming. Resting becomes active as soon as it is ready. Working reuses thinking, asleep reuses dreaming with uniform dimming, and arrive/react currently reuse resting. Dark remains off. Each clip gets at most two attempts with a 30-second retry cooldown and a 10-minute Agent-level failure cooldown. A per-Agent single-flight gate prevents overlapping GPU jobs. The square crop, source MP4s, reduced loops, prompts, seeds, exact job IDs, and provenance are stored as Leaf Assets and a `pixoo-portrait-pack` entity keyed by source hash and pipeline version. None are repository content.
+Clips are generated strictly one job at a time per Agent: the four resting variants first, followed by speaking, listening, thinking, and dreaming. The first resting variant becomes usable as soon as it is ready. Working reuses thinking, asleep reuses dreaming with uniform dimming, and arrive/react currently reuse resting. Dark turns the screen off. Each clip gets at most two attempts with a 30-second retry cooldown and a 10-minute Agent-level failure cooldown. A per-Agent single-flight gate prevents overlapping GPU jobs. The square crop, source MP4s, reduced loops, prompts, seeds, exact job IDs, and provenance are stored as Leaf Assets and a `pixoo-portrait-pack` entity keyed by source hash and pipeline version. None are repository content.
+
+Independent of conversation signals, a local-time scheduler selects dreaming from 02:00–05:00 and asleep during quiet hours from 23:30–07:30 when no listening, thinking, speaking, or working state is active. Outside those windows it returns to resting. These defaults are configurable with `PIXOO_DREAMING_START`, `PIXOO_DREAMING_END`, `PIXOO_QUIET_START`, and `PIXOO_QUIET_END` using local `HH:mm` values.
 
 ## Identity and live-event boundary
 
@@ -46,14 +48,16 @@ The current RedCompute model defines `UnifiedSessionInfo.OwnerAgentId`, but prov
 
 ## Pixoo-64 status and safety
 
-The hardware path is disabled by default. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no automatic retries, and never contacts Divoom services. The request sequence below was validated on a real Pixoo-64 on 21 October 2026:
+The hardware path is disabled by default. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no automatic retries, and never contacts Divoom services. The primary path, validated on a real Pixoo-64 on 21 October 2026, is:
 
-1. `Draw/ResetHttpGifId`
-2. one `Draw/SendHttpGif` request per 64×64 RGB frame with `PicNum`, `PicWidth=64`, `PicOffset`, `PicID`, `PicSpeed`, and base64 `PicData`
-3. `Channel/SetBrightness`
-4. `Channel/OnOffScreen`
+1. Determine the specific local IPv4 interface that routes to the configured Pixoo with a UDP connect (no packet is sent).
+2. Start a minimal Kestrel HTTP/1 listener on that routed address and port 18950, never on `0.0.0.0`.
+3. Serve only `GET /{process-random-128-bit-token}/{short-name}.gif` from the current in-memory GIF set. The token is never logged.
+4. Send `Device/PlayTFGif` with `FileType=2` and the plain-HTTP URL, then confirm the device fetched it by recording the request time and remote address.
 
-Each frame is exactly `64 × 64 × 3 = 12,288` RGB bytes before base64 encoding. Requests use buffered JSON bodies with `Content-Length` because the device rejects chunked bodies while still returning HTTP 200. A non-zero `error_code` is treated as failure, recorded by the per-device queue, and does not kill the queue worker.
+GIFs are exactly 64×64, loop forever, retain duplicate pause frames, and use a uniform 100 ms delay. `ffmpeg` encodes raw RGB24 with `palettegen`/`paletteuse=dither=none`; the repository adds no image-codec dependency. The GIF host port is configurable with `PIXOO_GIF_PORT`.
+
+If the listener cannot bind or the Pixoo does not fetch the URL within 12 seconds, the sink records “display could not fetch its animation: check the Leaf Pixoo GIF firewall rule” and falls back to `Draw/ResetHttpGifId` plus at most 40 uniformly timed `Draw/SendHttpGif` frames. This fallback retains the serialized latest-wins queue but necessarily shows the device's Loading overlay. Requests use buffered JSON bodies with `Content-Length` because the device rejects chunked bodies while still returning HTTP 200. A non-zero `error_code` is treated as failure and does not kill the queue worker. Dark sends `Channel/OnOffScreen` directly.
 
 ## Build and test
 

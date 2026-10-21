@@ -23,6 +23,7 @@ public sealed record PortraitProvenance(
     DateTimeOffset GeneratedAt);
 
 public sealed record PortraitClipProvenance(
+    string Key,
     FaceState State,
     string Workflow,
     long Seed,
@@ -39,14 +40,23 @@ public sealed record PortraitClip(FrameLoop Loop, PortraitClipProvenance Provena
 public sealed record PortraitPack(
     byte[] BasePixels,
     PortraitProvenance Provenance,
-    IReadOnlyDictionary<FaceState, PortraitClip> Clips)
+    IReadOnlyDictionary<string, PortraitClip> Clips)
 {
     public PortraitPack WithClip(PortraitClip clip)
     {
         var next = Clips.ToDictionary(item => item.Key, item => item.Value);
-        next[clip.Provenance.State] = clip;
+        next[clip.Provenance.Key] = clip;
         return this with { Clips = next };
     }
+
+    public PortraitClip? Primary(FaceState state)
+        => Clips.GetValueOrDefault(PortraitClipPlan.PrimaryKey(state));
+
+    public IReadOnlyList<PortraitClip> IdleVariants()
+        => PortraitClipPlan.Specs.Where(spec => spec.State == FaceState.Resting)
+            .Select(spec => Clips.GetValueOrDefault(spec.Key))
+            .OfType<PortraitClip>()
+            .ToArray();
 }
 
 public sealed record PreparedPortrait(
@@ -68,7 +78,7 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-video-v2-lightx2v";
+    public const string PipelineVersion = "portrait-gif-v3-lightx2v";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -119,7 +129,7 @@ public sealed class PortraitPackBuilder
             throw new InvalidDataException("Faithful portrait reduction is not exactly 64x64 RGB.");
         return new(prepared.BasePixels,
             new(sourceAssetId, prepared.SourceHash, PipelineVersion, generatedAt),
-            new Dictionary<FaceState, PortraitClip>());
+            new Dictionary<string, PortraitClip>());
     }
 
     internal static VideoPlateGeometry BuildPlateGeometry(ImageRect square, int sourceWidth, int sourceHeight)

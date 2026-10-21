@@ -2,46 +2,43 @@ using System.Collections.Concurrent;
 
 namespace Leaf.Plugins.Pixoo.Tests;
 
-public sealed class MotionReplaySchedulerTests
+public sealed class AnimationRotationSchedulerTests
 {
     [Fact]
-    public async Task Held_state_shows_still_then_exactly_one_motion_cycle_then_still()
+    public async Task Resting_state_rotates_complete_composite_without_still_reuploads()
     {
         var clock = new StepClock();
         var sink = new RecordingSink();
-        var settings = new PortraitClipSettings { MotionPlaybackMargin = TimeSpan.FromMilliseconds(500) };
-        using var scheduler = new MotionReplayScheduler(clock, new FixedRandom(TimeSpan.FromSeconds(20)), settings);
+        var settings = new PixooPlaybackSettings
+        {
+            RotationMinimum = TimeSpan.FromMinutes(10),
+            RotationMaximum = TimeSpan.FromMinutes(20),
+        };
+        using var scheduler = new AnimationRotationScheduler(clock, new FixedRandom(TimeSpan.FromMinutes(15)), settings);
         await using var queue = new DevicePushQueue(sink, clock);
 
-        scheduler.Replace(Device(), FaceState.Resting, null, "state.changed", HeldProgram(), queue);
+        scheduler.Replace(Device(), FaceState.Resting, null, "state.changed", RestingProgram(), queue);
         await sink.WaitForCount(1);
         Assert.Equal((byte)1, sink.Pushes[0].Loop.Frames[0].Pixels[0]);
 
         var gap = await clock.NextDelay();
-        Assert.Equal(TimeSpan.FromSeconds(20), gap.Duration);
+        Assert.Equal(TimeSpan.FromMinutes(15), gap.Duration);
         gap.Complete();
         await sink.WaitForCount(2);
-        Assert.Equal("motion.replay", sink.Pushes[1].Cause);
-        Assert.Equal(2, sink.Pushes[1].Loop.Frames.Count);
-
-        var playback = await clock.NextDelay();
-        Assert.Equal(TimeSpan.FromMilliseconds(700), playback.Duration);
-        playback.Complete();
-        await sink.WaitForCount(3);
-        Assert.Equal("motion.still", sink.Pushes[2].Cause);
-        Assert.Single(sink.Pushes[2].Loop.Frames);
+        Assert.Equal("animation.rotate", sink.Pushes[1].Cause);
+        Assert.Equal((byte)2, sink.Pushes[1].Loop.Frames[0].Pixels[0]);
     }
 
     [Fact]
-    public async Task Real_state_change_cancels_pending_held_replay()
+    public async Task Real_state_change_cancels_pending_rotation()
     {
         var clock = new StepClock();
         var sink = new RecordingSink();
-        using var scheduler = new MotionReplayScheduler(clock, new FixedRandom(TimeSpan.FromSeconds(20)), new());
+        using var scheduler = new AnimationRotationScheduler(clock, new FixedRandom(TimeSpan.FromMinutes(15)), new());
         await using var queue = new DevicePushQueue(sink, clock);
         var device = Device();
 
-        scheduler.Replace(device, FaceState.Resting, null, "resting", HeldProgram(), queue);
+        scheduler.Replace(device, FaceState.Resting, null, "resting", RestingProgram(), queue);
         await sink.WaitForCount(1);
         var cancelledGap = await clock.NextDelay();
         scheduler.Replace(device, FaceState.Speaking, null, "speaking", ContinuousProgram(), queue);
@@ -55,21 +52,19 @@ public sealed class MotionReplaySchedulerTests
     }
 
     [Fact]
-    public async Task Replay_upload_obeys_the_device_queue_minimum_gap()
+    public async Task Rotation_obeys_the_device_queue_minimum_gap()
     {
         var clock = new StepClock();
         var sink = new RecordingSink();
-        var settings = new PortraitClipSettings
+        var settings = new PixooPlaybackSettings
         {
-            ReplayGaps = new Dictionary<FaceState, MotionReplayRange>
-            {
-                [FaceState.Resting] = new(TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(100)),
-            },
+            RotationMinimum = TimeSpan.FromMilliseconds(100),
+            RotationMaximum = TimeSpan.FromMilliseconds(100),
         };
-        using var scheduler = new MotionReplayScheduler(clock, new FixedRandom(TimeSpan.FromMilliseconds(100)), settings);
+        using var scheduler = new AnimationRotationScheduler(clock, new FixedRandom(TimeSpan.FromMilliseconds(100)), settings);
         await using var queue = new DevicePushQueue(sink, clock);
 
-        scheduler.Replace(Device(minimumPushGapMs: 1000), FaceState.Resting, null, "resting", HeldProgram(), queue);
+        scheduler.Replace(Device(minimumPushGapMs: 1000), FaceState.Resting, null, "resting", RestingProgram(), queue);
         await sink.WaitForCount(1);
         (await clock.NextDelay()).Complete();
 
@@ -78,23 +73,22 @@ public sealed class MotionReplaySchedulerTests
         Assert.Single(sink.Pushes);
         pacing.Complete();
         await sink.WaitForCount(2);
-        Assert.Equal("motion.replay", sink.Pushes[1].Cause);
+        Assert.Equal("animation.rotate", sink.Pushes[1].Cause);
     }
 
     [Fact]
-    public void Default_held_state_gaps_are_randomised_between_fifteen_and_thirty_seconds()
+    public void Default_composite_rotations_are_ten_to_twenty_minutes()
     {
-        var settings = new PortraitClipSettings();
-        foreach (var state in new[] { FaceState.Resting, FaceState.Listening, FaceState.Thinking, FaceState.Dreaming, FaceState.Asleep })
-            Assert.Equal(MotionReplayRange.Default, settings.ReplayGapFor(state));
-        Assert.Null(settings.ReplayGapFor(FaceState.Speaking));
+        var settings = new PixooPlaybackSettings();
+        Assert.Equal(TimeSpan.FromMinutes(10), settings.RotationMinimum);
+        Assert.Equal(TimeSpan.FromMinutes(20), settings.RotationMaximum);
     }
 
     private static PixooDevice Device(int minimumPushGapMs = 0)
         => new(Guid.NewGuid(), "test", DeviceKind.Emulator, null, 100, Guid.NewGuid(), "#ffffff", minimumPushGapMs);
 
-    private static DisplayProgram HeldProgram()
-        => new(Loop(1), new FrameLoop([Frame(2, 100), Frame(2, 100)]), DisplayPlaybackMode.Held);
+    private static DisplayProgram RestingProgram()
+        => new(Loop(0), Loop(1), DisplayPlaybackMode.Continuous, [Loop(2), Loop(3)]);
 
     private static DisplayProgram ContinuousProgram()
         => new(Loop(1), Loop(3), DisplayPlaybackMode.Continuous);
@@ -102,11 +96,11 @@ public sealed class MotionReplaySchedulerTests
     private static FrameLoop Loop(byte value) => new([Frame(value, 1000)]);
     private static RgbFrame Frame(byte value, int duration) => new(Enumerable.Repeat(value, RgbFrame.ByteCount).ToArray(), duration);
 
-    private sealed class FixedRandom(TimeSpan value) : IMotionGapRandom
+    private sealed class FixedRandom(TimeSpan value) : IRotationRandom
     {
-        public TimeSpan Next(MotionReplayRange range)
+        public TimeSpan Next(TimeSpan minimum, TimeSpan maximum)
         {
-            Assert.InRange(value, range.Minimum, range.Maximum);
+            Assert.InRange(value, minimum, maximum);
             return value;
         }
     }

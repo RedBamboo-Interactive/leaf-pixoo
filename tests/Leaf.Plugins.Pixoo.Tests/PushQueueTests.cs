@@ -26,7 +26,7 @@ public sealed class PushQueueTests
     }
 
     private static PixooDevice Device() => new(Guid.NewGuid(), "test", DeviceKind.Emulator, null, 80, Guid.NewGuid(), "#44ccaa", 1000);
-    private static DisplayPush Push(FaceState state) => new(new([new(new byte[RgbFrame.ByteCount], 100)]), state, null, "test", DateTimeOffset.UtcNow);
+    private static DisplayPush Push(FaceState state) => new(new([new(new byte[RgbFrame.ByteCount], 100)]), state, null, "test", DateTimeOffset.UtcNow, state.ToString());
 
     private sealed class RecordingSink : IDisplaySink
     {
