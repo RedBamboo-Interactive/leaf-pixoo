@@ -1,10 +1,8 @@
 import type {Agent,Device,FaceGesture,FaceState,Frame,Snapshot} from './types'
-import {createExecutionTokenClient} from '@redbamboo/utility'
 
 declare const __PIXOO_HAS_LOCAL_PREVIEW__:boolean
 
 const base='/api/extensions/pixoo'
-const client=createExecutionTokenClient('pixoo')
 const params=new URLSearchParams(location.search)
 const harness=location.port==='4173' || params.has('harness')
 const ids={device:'11111111-1111-1111-1111-111111111111',second:'44444444-4444-4444-4444-444444444444',agent:'22222222-2222-2222-2222-222222222222',secondAgent:'33333333-3333-3333-3333-333333333333'}
@@ -18,7 +16,9 @@ let preview:Partial<Record<FaceState,Frame[]>>|null=null
 let previewRequest:Promise<void>|null=null
 
 async function json<T>(path:string,init?:RequestInit):Promise<T>{
-  const response=await client.fetch(base+path,{...init,headers:{'Content-Type':'application/json',...(init?.headers??{})}})
+  // Same-origin session auth, like other Nova sections: an app execution token is minted per route,
+  // and this page also renders inside Nova's /apps/nova/display, which does not belong to 'pixoo'.
+  const response=await fetch(base+path,{...init,credentials:'same-origin',headers:{'Content-Type':'application/json',...(init?.headers??{})}})
   if(!response.ok)throw new Error(`${response.status} ${response.statusText}`)
   return response.json() as Promise<T>
 }
