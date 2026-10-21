@@ -15,7 +15,7 @@ It is intentionally a face, not a dashboard. It never renders conversation text,
 - One serialized latest-wins queue per device. Each state change selects one complete GIF program; changes arriving during the minimum gap coalesce to the newest state.
 - Emulator state and a bounded push history exposed to the frontend. Logs contain timestamps and event types/causes, never content.
 - RedLeaf design-system chrome from `@redbamboo/ui` with Tailwind v4 tokens in both light and dark themes. Only the physical LED matrix, glow, gaps, and bezel are bespoke.
-- A standalone Leaf surface at `/apps/pixoo/emulator`, including a device list, editable device name, canonical Agent `EntityCard` references, and a design-system Agent picker.
+- No separate app: everything lives in Nova's **Display** section (`/apps/nova/display`). The old `/apps/pixoo` route redirects there.
 - A Nova `app-section` at `/apps/nova/display` with the same device-first controls. Device bindings are independent of Nova's selected-Agent filter.
 
 With no device records, both surfaces show a first-run **Add display** action. One device is selected automatically; with several, the owner selects the device before changing its name, Agent binding, brightness, simulated state, or gesture. Each device remains bound to exactly one Agent.
@@ -81,6 +81,6 @@ The local visual harness is `pnpm run dev` from `web/`. It uses a deterministic 
 
 ## Loading after review
 
-Do not add this checkout to `leaf.workspace.json`. After review, build the `.leafpkg`, then have a RedLeaf administrator install that exact local package through `POST /api/plugins/install` with JSON `{ "path": "<absolute package path>", "sha256": "<value from .sha256>" }` and the signed execution bearer. Verify `GET /api/plugins/pixoo/status` reports the package on disk and restart pending. Coordinate one planned `POST /api/setup/restart`; after Leaf returns, verify the same status reports the backend loaded, then open `/apps/pixoo/emulator` or Nova's `/apps/nova/display` section.
+Do not add this checkout to `leaf.workspace.json`. After review, build the `.leafpkg`, then have a RedLeaf administrator install that exact local package through `POST /api/plugins/install` with JSON `{ "path": "<absolute package path>", "sha256": "<value from .sha256>" }` and the signed execution bearer. Verify `GET /api/plugins/pixoo/status` reports the package on disk and restart pending. Coordinate one planned `POST /api/setup/restart`; after Leaf returns, verify the same status reports the backend loaded, then open Nova's `/apps/nova/display` section.
 
 No Skill seeds ship in this package.
