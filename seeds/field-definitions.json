@@ -15,8 +15,8 @@
   {"parentType":"pixoo-portrait-pack","slug":"pipeline_version","name":"Pipeline version","fieldType":"string","isRequired":true,"sortOrder":4},
   {"parentType":"pixoo-portrait-pack","slug":"generated_at","name":"Generated at","fieldType":"string","isRequired":true,"sortOrder":5},
   {"parentType":"pixoo-portrait-pack","slug":"crop_asset","name":"Square bust crop","fieldType":"string","isRequired":true,"sortOrder":6},
-  {"parentType":"pixoo-portrait-pack","slug":"plate_asset","name":"Video plate","fieldType":"string","isRequired":true,"sortOrder":7},
+  {"parentType":"pixoo-portrait-pack","slug":"plate_asset","name":"Video plate","fieldType":"string","isRequired":false,"sortOrder":7},
   {"parentType":"pixoo-portrait-pack","slug":"base_asset","name":"Faithful 64x64 portrait","fieldType":"string","isRequired":true,"sortOrder":8},
-  {"parentType":"pixoo-portrait-pack","slug":"plate","name":"Plate geometry","fieldType":"json","isRequired":true,"sortOrder":9},
+  {"parentType":"pixoo-portrait-pack","slug":"plate","name":"Plate geometry","fieldType":"json","isRequired":false,"sortOrder":9},
   {"parentType":"pixoo-portrait-pack","slug":"clips","name":"Video clip provenance","fieldType":"json","isRequired":true,"sortOrder":10}
 ]

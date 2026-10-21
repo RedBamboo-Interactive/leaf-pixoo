@@ -69,6 +69,13 @@ public sealed class PixooPlugin : ILeafPlugin
     public Task OnStartupAsync(IPluginHost host, CancellationToken ct)
     {
         host.GetRequiredService<PixooEventBridge>().Start();
+        var service = host.GetRequiredService<PixooService>();
+        // Fire and forget: a slow or unreachable display must never delay Leaf startup.
+        _ = Task.Run(async () =>
+        {
+            try { await service.ResumeAllAsync(CancellationToken.None); }
+            catch (Exception) { /* Device and portrait status surfaces carry the failure. */ }
+        }, CancellationToken.None);
         return Task.CompletedTask;
     }
 

@@ -35,6 +35,9 @@ public sealed class PortraitPackService(
     IVideoFrameDecoder decoder,
     PortraitClipSettings settings) : IPortraitPackCache, IDisposable
 {
+    // RedLeaf rejects plugin system execution tokens longer than 15 minutes.
+    internal static readonly TimeSpan ExecutionTokenLifetime = TimeSpan.FromMinutes(14);
+
     public const string PackEntityType = "pixoo-portrait-pack";
     public const string Workflow = "wan-22-i2v-first-last-portrait-film-60fps-4a256f5b";
     public const string QuietWorkflow = "wan-video-22-quiet-reportage-film-60fps-88c61e77";
@@ -267,7 +270,7 @@ public sealed class PortraitPackService(
     {
         var token = RequireExecutionTokens().IssueSystem(new PluginSystemExecutionTokenRequest(
             "plugin", PixooPlugin.Id, "Leaf Pixoo", $"Generate the selected Agent's {Slug(state)} display loop",
-            [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], TimeSpan.FromMinutes(20)));
+            [new("agent", EntityId: agentId.ToString()), new("asset", Id: source.AssetId)], ExecutionTokenLifetime));
         var imageUrl = LeafAssetUrl(imageAssetUrl);
         if (fastWorkflow is not null)
         {

@@ -107,6 +107,18 @@ public sealed class PixooService(
         return portraits.Status(agentId);
     }
 
+    /// <summary>
+    /// After a Leaf restart nothing has pushed yet and every state machine starts dark. Bring each
+    /// configured display back to resting and make sure its Agent's portrait pack is (re)loaded.
+    /// </summary>
+    public async Task ResumeAllAsync(CancellationToken ct)
+    {
+        var all = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType, Limit = 100 }, ct);
+        var devices = all.Select(Decode).ToArray();
+        foreach (var agentId in devices.Select(device => device.AgentId).Distinct()) portraits.Schedule(agentId);
+        foreach (var device in devices) await Push(device, FaceState.Resting, null, "startup", ct);
+    }
+
     public async Task RefreshPortraitAsync(Guid agentId)
     {
         var entitiesForAgent = await entities.QueryAsync(new EntityQuery

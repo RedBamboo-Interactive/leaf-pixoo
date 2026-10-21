@@ -86,3 +86,13 @@ public sealed class Pixoo64SinkTests
             => ++Calls == 1 ? throw new InvalidOperationException("boom") : Task.CompletedTask;
     }
 }
+
+public sealed class ExecutionTokenLifetimeTests
+{
+    [Fact]
+    public void Portrait_jobs_request_a_lifetime_RedLeaf_accepts()
+    {
+        Assert.True(PortraitPackService.ExecutionTokenLifetime > TimeSpan.Zero);
+        Assert.True(PortraitPackService.ExecutionTokenLifetime <= TimeSpan.FromMinutes(15));
+    }
+}
