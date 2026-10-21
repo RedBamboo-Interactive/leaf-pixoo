@@ -1,12 +1,14 @@
 import type {Agent,Device,FaceGesture,FaceState,Frame,Snapshot} from './types'
 import {createExecutionTokenClient} from '@redbamboo/utility'
 
+declare const __PIXOO_HAS_LOCAL_PREVIEW__:boolean
+
 const base='/api/extensions/pixoo'
 const client=createExecutionTokenClient('pixoo')
 const params=new URLSearchParams(location.search)
 const harness=location.port==='4173' || params.has('harness')
 const ids={device:'11111111-1111-1111-1111-111111111111',second:'44444444-4444-4444-4444-444444444444',agent:'22222222-2222-2222-2222-222222222222',secondAgent:'33333333-3333-3333-3333-333333333333'}
-const agents:Agent[]=[{id:ids.agent,name:'Nova',color:'#9a7cff',avatarUrl:'/source-crop.png'},{id:ids.secondAgent,name:'Vesper',color:'#78e6c4'}]
+const agents:Agent[]=[{id:ids.agent,name:'Demo Agent',color:'#9a7cff'},{id:ids.secondAgent,name:'Second Agent',color:'#78e6c4'}]
 const primary:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
 const secondary:Device={id:ids.second,name:'Studio shelf',kind:'emulator',brightness:68,agentId:ids.secondAgent,agentColor:'#78e6c4',minimumPushGapMs:1000,hardwareEnabled:false}
 const scenario=params.get('scenario')??'one'
@@ -72,6 +74,7 @@ function makeSnapshot(device:Device):Snapshot{
 
 async function loadPreview(){
   if(preview||!harness)return
+  if(!__PIXOO_HAS_LOCAL_PREVIEW__){preview={};return}
   previewRequest??=fetch('/portrait-preview.json').then(async response=>{
     if(!response.ok)throw new Error(`portrait preview ${response.status}`)
     const body=await response.json() as {states:Partial<Record<FaceState,Frame[]>>}

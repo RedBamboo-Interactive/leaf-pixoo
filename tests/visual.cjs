@@ -1,15 +1,11 @@
 const { chromium } = require('../web/node_modules/playwright');
-const fs = require('node:fs');
 const path = require('node:path');
+const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs');
 
 (async () => {
-  const artifacts = path.resolve(__dirname, '../artifacts/portrait');
-  fs.mkdirSync(artifacts, { recursive: true });
+  const artifacts = outputDirectory('portrait');
   const states = (process.env.PIXOO_VISUAL_STATES || 'resting,speaking,dreaming').split(',').filter(Boolean);
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  });
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const errors = [];
   let screenshots = 0;
   try {
@@ -41,7 +37,7 @@ const path = require('node:path');
 
     if (states.includes('speaking')) {
       await page.setViewportSize({ width: 1180, height: 900 });
-      await page.goto('http://127.0.0.1:4173/?harness=1&theme=dark&surface=nova&agentId=22222222-2222-2222-2222-222222222222', { waitUntil: 'networkidle' });
+      await page.goto('http://127.0.0.1:4173/?harness=1&theme=dark&surface=nova', { waitUntil: 'networkidle' });
       await page.getByRole('main').waitFor();
       await page.getByRole('button', { name: 'speaking', exact: true }).click();
       await page.getByTestId('current-state').getByText('speaking', { exact: true }).waitFor();

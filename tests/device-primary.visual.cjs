@@ -1,14 +1,10 @@
 const { chromium } = require('../web/node_modules/playwright');
-const fs = require('node:fs');
 const path = require('node:path');
+const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs');
 
 (async () => {
-  const artifacts = path.resolve(__dirname, '../artifacts/device-primary');
-  fs.mkdirSync(artifacts, { recursive: true });
-  const browser = await chromium.launch({
-    headless: true,
-    executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  });
+  const artifacts = outputDirectory('device-primary');
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const errors = [];
   let screenshots = 0;
   try {
@@ -23,7 +19,7 @@ const path = require('node:path');
         if (scenario === 'empty') await page.getByText('No displays yet', { exact: true }).waitFor();
         else await page.getByRole('img', { name: /pixel face/ }).waitFor();
         if (scenario === 'one') await page.getByText('Bound Agent', { exact: true }).waitFor();
-        if (scenario === 'two') await page.getByText('Emulator · Vesper', { exact: true }).waitFor();
+        if (scenario === 'two') await page.getByText('Emulator · Second Agent', { exact: true }).waitFor();
         await page.evaluate(() => window.scrollTo(0, 0));
         await page.screenshot({
           path: path.join(artifacts, `${scenario}-${viewport}.png`),
@@ -35,8 +31,8 @@ const path = require('node:path');
           await page.getByLabel('Name').press('Enter');
           await page.getByRole('button', { name: 'Select Lounge display' }).waitFor();
           await page.getByRole('button', { name: 'Change' }).click();
-          await page.getByRole('button', { name: 'Select Vesper' }).click();
-          await page.getByText('Emulator · Vesper', { exact: true }).waitFor();
+          await page.getByRole('button', { name: 'Select Second Agent' }).click();
+          await page.getByText('Emulator · Second Agent', { exact: true }).waitFor();
         }
       }
     }

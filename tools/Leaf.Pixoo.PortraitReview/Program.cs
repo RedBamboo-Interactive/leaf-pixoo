@@ -13,7 +13,7 @@ var builder = new PortraitPackBuilder();
 var sourcePath = Path.GetFullPath(args[1]);
 if (args[0] == "prepare")
 {
-    var output = Path.GetFullPath(args[2]);
+    var output = ReviewOutputDirectory(args[2]);
     Directory.CreateDirectory(output);
     var prepared = builder.Prepare(await File.ReadAllBytesAsync(sourcePath));
     await File.WriteAllBytesAsync(Path.Combine(output, "source-crop.png"), prepared.CropPng);
@@ -35,7 +35,7 @@ if (args.Length < 6 || !long.TryParse(args[3], out var seed))
 }
 
 var candidatePath = Path.GetFullPath(args[2]);
-var outputDir = Path.GetFullPath(args[4]);
+var outputDir = ReviewOutputDirectory(args[4]);
 var landmarkPath = Path.GetFullPath(args[5]);
 Directory.CreateDirectory(outputDir);
 int? paletteColors = null;
@@ -53,7 +53,7 @@ var preparedPortrait = builder.Prepare(sourceBytes);
 var landmarkPng = await File.ReadAllBytesAsync(landmarkPath);
 var landmarks = FaceMeshLandmarkDetector.Detect(landmarkPng);
 var pack = builder.Build(await File.ReadAllBytesAsync(candidatePath), preparedPortrait, landmarks,
-    "815d29b8-3bf4-443f-81ca-ba9263d1ee9f.png", PortraitPackService.Workflow, seed, DateTimeOffset.UtcNow, reductionOptions);
+    Path.GetFileName(sourcePath), PortraitPackService.Workflow, seed, DateTimeOffset.UtcNow, reductionOptions);
 foreach (var artifact in PortraitReview.Create(pack, preparedPortrait.CropPng, "#9a7cff"))
     await File.WriteAllBytesAsync(Path.Combine(outputDir, artifact.FileName), artifact.Bytes);
 await File.WriteAllBytesAsync(Path.Combine(outputDir, "source-crop.png"), preparedPortrait.CropPng);
@@ -94,4 +94,23 @@ static long SeedFor(string hash, int attempt)
     var bytes = Convert.FromHexString(hash[..16]);
     var value = BinaryPrimitives.ReadUInt64LittleEndian(bytes) ^ (0x9E3779B97F4A7C15UL * (ulong)(attempt + 1));
     return (long)(value % int.MaxValue) + 1;
+}
+
+static string ReviewOutputDirectory(string value)
+{
+    var candidate = Path.GetFullPath(value);
+    var ignoredArtifacts = Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "artifacts"));
+    var scratch = Environment.GetEnvironmentVariable("REDLEAF_SCRATCH_DIR");
+    if (Inside(ignoredArtifacts, candidate)
+        || !string.IsNullOrWhiteSpace(scratch) && Inside(Path.GetFullPath(scratch), candidate))
+        return candidate;
+    throw new InvalidOperationException(
+        "Review output must be inside the ignored artifacts directory or REDLEAF_SCRATCH_DIR.");
+}
+
+static bool Inside(string root, string candidate)
+{
+    var relative = Path.GetRelativePath(root, candidate);
+    return relative == "." || !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+        && relative != ".." && !Path.IsPathRooted(relative);
 }

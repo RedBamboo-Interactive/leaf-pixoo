@@ -23,18 +23,17 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Current_portrait_regions_match_high_resolution_landmarks_and_validate_geometry()
+    public void Synthetic_portrait_regions_match_known_landmarks_and_validate_geometry()
     {
-        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
-        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
-            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var landmarks = SyntheticLandmarks();
+        var scaffold = SyntheticScaffold();
         var regions = landmarks.ApplyTo(scaffold);
-        var basePixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var basePixels = SyntheticPortrait(landmarks);
         var validation = new PortraitPackBuilder().Validate(basePixels, regions, landmarks: landmarks);
 
-        AssertRegionNear(new PixelRegion(22, 22, 6, 5), regions.LeftEye);
-        AssertRegionNear(new PixelRegion(29, 20, 7, 5), regions.RightEye);
-        AssertRegionNear(new PixelRegion(27, 28, 8, 6), regions.Mouth);
+        AssertRegionNear(new PixelRegion(18, 19, 10, 9), regions.LeftEye);
+        AssertRegionNear(new PixelRegion(33, 17, 11, 9), regions.RightEye);
+        AssertRegionNear(new PixelRegion(26, 30, 11, 6), regions.Mouth);
         var mouthRow = landmarks.LipLine.Average(point => point.Y);
         Assert.True(mouthRow > landmarks.LeftEyeOutline.Average(point => point.Y));
         Assert.True(mouthRow > landmarks.RightEyeOutline.Average(point => point.Y));
@@ -44,9 +43,8 @@ public sealed class PortraitPipelineTests
     [Fact]
     public void Validation_rejects_landmarks_outside_the_face_or_mouth_above_the_eyes()
     {
-        var valid = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
-        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
-            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var valid = SyntheticLandmarks();
+        var scaffold = SyntheticScaffold();
         var invalid = valid with
         {
             LeftEyeOutline = [new(2, 2), new(4, 2), new(4, 4), new(2, 4)],
@@ -55,7 +53,7 @@ public sealed class PortraitPipelineTests
         };
         var regions = invalid.ApplyTo(scaffold);
         var validation = new PortraitPackBuilder().Validate(
-            PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png")), regions, landmarks: invalid);
+            SyntheticPortrait(valid), regions, landmarks: invalid);
 
         Assert.False(validation.Valid);
         Assert.Contains(validation.Errors, error => error.Contains("inside the face", StringComparison.Ordinal));
@@ -167,11 +165,10 @@ public sealed class PortraitPipelineTests
     [Fact]
     public void Closed_blink_repaints_every_eye_polygon_pixel_without_retaining_iris_or_pupil_colours()
     {
-        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
-        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
-            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var landmarks = SyntheticLandmarks();
+        var scaffold = SyntheticScaffold();
         var regions = landmarks.ApplyTo(scaffold);
-        var basePixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var basePixels = SyntheticPortrait(landmarks);
         var closed = basePixels.ToArray();
         PortraitAnimation.ApplyBlink(closed, regions, landmarks);
 
@@ -188,30 +185,33 @@ public sealed class PortraitPipelineTests
     [Fact]
     public void Resting_blink_sequence_is_open_half_closed_half_open()
     {
-        var landmarks = FaceMeshLandmarkDetector.Detect(Fixture("nova-landmark-source-1024.png"));
-        var scaffold = new PortraitRegions(new(18, 2, 28, 32), new(0, 0, 1, 1), new(0, 0, 1, 1),
-            new(0, 0, 1, 1), new(4, 32, 56, 32), new(4, 0, 56, 64));
+        var landmarks = SyntheticLandmarks();
+        var scaffold = SyntheticScaffold();
         var regions = landmarks.ApplyTo(scaffold);
-        var pixels = PortraitPackBuilder.DecodePng(Fixture("nova-base-64.png"));
+        var pixels = SyntheticPortrait(landmarks);
         var mask = FigureMaskBuilder.Build(regions);
+        var half = pixels.ToArray();
+        PortraitAnimation.ApplyBlink(half, regions, landmarks, .5);
+        var closed = pixels.ToArray();
+        PortraitAnimation.ApplyBlink(closed, regions, landmarks);
+        var polygon = PortraitAnimation.RasterizePolygon(landmarks.LeftEyeOutline);
+        var changed = new[] { pixels, half, closed, half, pixels }
+            .Select(frame => polygon.Count(point => PixelChanged(pixels, frame, point.X, point.Y))).ToArray();
+
+        Assert.Equal(0, changed[0]);
+        Assert.InRange(changed[1], 1, changed[2] - 1);
+        Assert.True(changed[2] > changed[1]);
+        Assert.Equal(changed[1], changed[3]);
+        Assert.Equal(0, changed[4]);
+
         var pack = new PortraitPack(pixels, pixels, mask, regions,
             new PortraitProvenance("source", "hash", PortraitPackBuilder.PipelineVersion, "test", 1, DateTimeOffset.UnixEpoch, null),
             PaletteQuantizer.CountColors(pixels), 100,
             new PortraitColorMatchMetrics(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), Landmarks: landmarks);
         var frames = PortraitAnimation.Render(pack, FaceState.Resting, "#9a7cff", 100).Frames;
-        var polygon = PortraitAnimation.RasterizePolygon(landmarks.LeftEyeOutline);
-        var changed = frames.Select(frame =>
-        {
-            var factor = UniformFactor(pixels, frame.Pixels, mask, regions);
-            var expected = pixels.Select(value => (byte)Math.Clamp(Math.Round(value * factor), 0, 255)).ToArray();
-            return polygon.Count(point => PixelChanged(expected, frame.Pixels, point.X, point.Y));
-        }).ToArray();
-
-        Assert.Equal(0, changed[7]);
-        Assert.InRange(changed[8], 1, changed[9] - 1);
-        Assert.True(changed[9] > changed[8]);
-        Assert.Equal(changed[8], changed[10]);
-        Assert.Equal(0, changed[11]);
+        Assert.Equal(700, frames[7].DurationMs);
+        Assert.Equal([120, 120, 120], frames.Skip(8).Take(3).Select(frame => frame.DurationMs));
+        Assert.Equal(700, frames[11].DurationMs);
     }
 
     [Fact]
@@ -388,14 +388,46 @@ public sealed class PortraitPipelineTests
         }
     }
 
-    private static byte[] Fixture(string suffix)
+    private static PortraitRegions SyntheticScaffold() => new(
+        new(12, 8, 40, 34), new(0, 0, 1, 1), new(0, 0, 1, 1),
+        new(0, 0, 1, 1), new(10, 38, 44, 26), new(8, 4, 48, 60));
+
+    private static PortraitLandmarks SyntheticLandmarks() => new(
+        "synthetic-test-fixture", 1024, 1024,
+        [new(14, 12), new(28, 8), new(45, 11), new(51, 25), new(47, 40), new(29, 43), new(13, 34)],
+        [new(19, 22), new(22, 20), new(26, 21), new(26, 24), new(23, 26), new(19, 25)],
+        [new(34, 20), new(38, 18), new(42, 20), new(41, 23), new(37, 24), new(34, 22)],
+        [new(27, 32), new(29, 31), new(31, 31), new(33, 32), new(35, 32)],
+        [new(27, 33), new(29, 34), new(31, 34), new(33, 34), new(35, 33)]);
+
+    private static byte[] SyntheticPortrait(PortraitLandmarks landmarks)
     {
-        var assembly = typeof(PortraitPipelineTests).Assembly;
-        var name = assembly.GetManifestResourceNames().Single(resource => resource.EndsWith(suffix, StringComparison.Ordinal));
-        using var stream = assembly.GetManifestResourceStream(name)!;
-        using var memory = new MemoryStream();
-        stream.CopyTo(memory);
-        return memory.ToArray();
+        var pixels = new byte[RgbFrame.ByteCount];
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
+        {
+            var distance = Math.Pow((x - 31) / 20d, 2) + Math.Pow((y - 27) / 22d, 2);
+            var color = distance <= 1 ? ((byte)206, (byte)151, (byte)116) : ((byte)28, (byte)42, (byte)57);
+            if (y >= 40 && x is >= 9 and <= 55) color = (54, 92, 137);
+            PutSynthetic(pixels, x, y, color);
+        }
+        foreach (var outline in new[] { landmarks.LeftEyeOutline, landmarks.RightEyeOutline })
+        {
+            var eye = PortraitAnimation.RasterizePolygon(outline).ToArray();
+            foreach (var point in eye) PutSynthetic(pixels, point.X, point.Y, (232, 218, 196));
+            var center = eye.OrderBy(point => Math.Abs(point.X - eye.Average(value => value.X))
+                + Math.Abs(point.Y - eye.Average(value => value.Y))).First();
+            PutSynthetic(pixels, center.X, center.Y, (62, 75, 82));
+            if (center.Y + 1 < 64) PutSynthetic(pixels, center.X, center.Y + 1, (25, 31, 36));
+        }
+        foreach (var point in landmarks.LipLine) PutSynthetic(pixels, point.X, point.Y, (111, 48, 45));
+        return pixels;
+    }
+
+    private static void PutSynthetic(byte[] pixels, int x, int y, (byte R, byte G, byte B) color)
+    {
+        var index = (y * 64 + x) * 3;
+        pixels[index] = color.R; pixels[index + 1] = color.G; pixels[index + 2] = color.B;
     }
 
     private static void AssertRegionNear(PixelRegion expected, PixelRegion actual)

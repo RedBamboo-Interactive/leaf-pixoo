@@ -61,7 +61,8 @@ The package script is build-only and requires an explicit canonical SDK project.
 
 ```powershell
 dotnet test .\tests\Leaf.Plugins.Pixoo.Tests\Leaf.Plugins.Pixoo.Tests.csproj `
-  -p:LeafSdkProject='T:\Projects\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj'
+  -p:LeafSdkProject='<path-to-redleaf>\src\Leaf.Sdk\Leaf.Sdk.csproj' `
+  --artifacts-path "$env:REDLEAF_SCRATCH_DIR\leaf-pixoo-tests"
 
 Push-Location .\web
 pnpm install --frozen-lockfile
@@ -69,10 +70,10 @@ pnpm run typecheck
 pnpm run build:pkg
 Pop-Location
 
-.\build-leafpkg.ps1 -LeafSdkProject 'T:\Projects\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj'
+.\build-leafpkg.ps1 -LeafSdkProject '<path-to-redleaf>\src\Leaf.Sdk\Leaf.Sdk.csproj'
 ```
 
-The local visual harness is `pnpm run dev` from `web/`; in development only, it reads `artifacts/portrait/portrait-preview.json` so Playwright can exercise the accepted Nova pack without installing the extension or contacting Leaf. `node tests/visual.cjs` captures portrait state evidence, while `node tests/device-primary.visual.cjs` covers empty, one-device, and two-device flows at desktop and phone sizes. Production builds do not copy the harness preview.
+The local visual harness is `pnpm run dev` from `web/`. It uses a deterministic synthetic face by default, so no Agent imagery is needed in the checkout. To inspect a private local pack, set `PIXOO_PREVIEW_DIR` to a directory inside `REDLEAF_SCRATCH_DIR` (or the ignored local review directory) that contains `portrait-preview.json`; it is served only in dev mode and never copied into production. The Playwright scripts write beneath `REDLEAF_SCRATCH_DIR` when set, otherwise to the ignored local review directory.
 
 ## Loading after review
 
