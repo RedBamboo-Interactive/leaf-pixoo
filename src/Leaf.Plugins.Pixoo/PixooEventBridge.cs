@@ -34,13 +34,27 @@ public sealed class PixooEventBridge(IPluginEvents events, PixooService service,
         try { change = activity.Apply(evt.Payload); }
         catch (Exception) { return Task.CompletedTask; }
         if (change is not { } value) return Task.CompletedTask;
+        // A Nova turn flips between thinking, speaking and working every second or two. Every change is
+        // a new GIF the Pixoo must download, and back-to-back swaps rebooted the device. Only a state
+        // that has held for the settle time reaches the displays; a newer change restarts the wait.
+        var pending = new CancellationTokenSource();
+        if (settling.TryGetValue(value.AgentId, out var previous)) previous.Cancel();
+        settling[value.AgentId] = pending;
         _ = Task.Run(async () =>
         {
-            try { await service.ApplyAgentActivityAsync(value.AgentId, value.State, CancellationToken.None); }
+            try
+            {
+                await Task.Delay(ActivitySettle, pending.Token);
+                await service.ApplyAgentActivityAsync(value.AgentId, value.State, CancellationToken.None);
+            }
+            catch (OperationCanceledException) { /* Superseded by a newer activity change. */ }
             catch (Exception) { /* Device status surfaces delivery failures. */ }
         });
         return Task.CompletedTask;
     }
+
+    internal static TimeSpan ActivitySettle { get; set; } = TimeSpan.FromSeconds(3);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, CancellationTokenSource> settling = new();
 
     private async Task HandlePortrait(PluginEvent evt)
     {

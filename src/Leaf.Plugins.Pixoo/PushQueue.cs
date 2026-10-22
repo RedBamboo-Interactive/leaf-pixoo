@@ -24,6 +24,8 @@ public sealed class DevicePushQueue(IDisplaySink sink, IPushClock clock) : IAsyn
     /// <summary>Most recent push failure, cleared by the next successful push.</summary>
     public string? LastError { get; private set; }
 
+    internal const int HardwareMinimumGapMs = 5000;
+
     public void Enqueue(PixooDevice device, DisplayPush push)
     {
         push.Loop.Validate();
@@ -52,7 +54,9 @@ public sealed class DevicePushQueue(IDisplaySink sink, IPushClock clock) : IAsyn
                 next = pending.Value;
                 pending = null;
             }
-            var gap = TimeSpan.FromMilliseconds(Math.Max(0, next.Device.MinimumPushGapMs));
+            // Real Pixoos download a GIF per push; swapping faster than a few seconds rebooted the device.
+            var floor = next.Device.Kind == DeviceKind.Pixoo64 && next.Device.HardwareEnabled ? HardwareMinimumGapMs : 0;
+            var gap = TimeSpan.FromMilliseconds(Math.Max(floor, Math.Max(0, next.Device.MinimumPushGapMs)));
             if (lastPush is { } previous)
             {
                 var remaining = gap - (clock.UtcNow - previous);

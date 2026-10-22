@@ -25,6 +25,27 @@ public sealed class PushQueueTests
         Assert.True(sink.MaximumConcurrency <= 1);
     }
 
+    [Fact]
+    public async Task Real_pixoo_pushes_are_spaced_by_the_hardware_floor_even_with_a_small_configured_gap()
+    {
+        var sink = new RecordingSink();
+        var clock = new GapClock();
+        await using var queue = new DevicePushQueue(sink, clock);
+        var device = Device() with { Kind = DeviceKind.Pixoo64, HardwareEnabled = true, MinimumPushGapMs = 0, Host = "192.0.2.10" };
+        queue.Enqueue(device, Push(FaceState.Resting));
+        await sink.WaitForCount(1);
+        queue.Enqueue(device, Push(FaceState.Thinking));
+        await sink.WaitForCount(2);
+        Assert.Equal(TimeSpan.FromMilliseconds(DevicePushQueue.HardwareMinimumGapMs), clock.Requested.Single());
+    }
+
+    private sealed class GapClock : IPushClock
+    {
+        public List<TimeSpan> Requested { get; } = [];
+        public DateTimeOffset UtcNow { get; private set; } = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        public Task Delay(TimeSpan duration, CancellationToken ct) { Requested.Add(duration); UtcNow += duration; return Task.CompletedTask; }
+    }
+
     private static PixooDevice Device() => new(Guid.NewGuid(), "test", DeviceKind.Emulator, null, 80, Guid.NewGuid(), "#44ccaa", 1000);
     private static DisplayPush Push(FaceState state) => new(new([new(new byte[RgbFrame.ByteCount], 100)]), state, null, "test", DateTimeOffset.UtcNow, state.ToString());
 
