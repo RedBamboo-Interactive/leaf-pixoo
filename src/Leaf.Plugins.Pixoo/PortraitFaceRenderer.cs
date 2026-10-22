@@ -5,21 +5,23 @@ public interface IPortraitPackCache
     PortraitPack? Current(Guid agentId);
 }
 
-public sealed class PortraitFaceRenderer(IPortraitPackCache packs, ProceduralFaceRenderer fallback) : IFaceRenderer
+public sealed class PortraitFaceRenderer(IPortraitPackCache packs, ProceduralFaceRenderer fallback, CompositeSettings compositeSettings) : IFaceRenderer
 {
     public DisplayProgram Render(Guid agentId, FaceState state, string color, int brightness, FaceGesture? gesture = null)
     {
         var pack = packs.Current(agentId);
         return pack is null
             ? fallback.Render(agentId, state, color, brightness, gesture)
-            : PortraitLoopRenderer.Render(pack, state, brightness, gesture);
+            : PortraitLoopRenderer.Render(pack, state, brightness, gesture, compositeSettings);
     }
 }
 
 public static class PortraitLoopRenderer
 {
-    public static DisplayProgram Render(PortraitPack pack, FaceState state, int brightness, FaceGesture? gesture = null)
+    public static DisplayProgram Render(PortraitPack pack, FaceState state, int brightness, FaceGesture? gesture = null,
+        CompositeSettings? compositeSettings = null)
     {
+        compositeSettings ??= new();
         if (state == FaceState.Dark)
         {
             var dark = new FrameLoop([new RgbFrame(new byte[RgbFrame.ByteCount], 900)]).Validate();
@@ -38,7 +40,7 @@ public static class PortraitLoopRenderer
         if (state == FaceState.Resting && gesture is null)
         {
             var idle = pack.IdleVariants().Select(clip => Scale(clip.Loop, level)).ToArray();
-            var composites = PortraitCompositeBuilder.BuildResting(still.Frames[0].Pixels, idle, pack.Provenance.SourceHash);
+            var composites = PortraitCompositeBuilder.BuildResting(still.Frames[0].Pixels, idle, pack.Provenance.SourceHash, compositeSettings);
             return new DisplayProgram(still, composites[0], DisplayPlaybackMode.Continuous,
                 composites.Skip(1).Concat(composites.Take(1)).ToArray()).Validate();
         }
@@ -48,8 +50,8 @@ public static class PortraitLoopRenderer
         var motion = Scale(clip.Loop, level);
         var loop = state switch
         {
-            FaceState.Listening => PortraitCompositeBuilder.WithPause(still.Frames[0].Pixels, motion, TimeSpan.FromSeconds(2)),
-            FaceState.Thinking or FaceState.Working => PortraitCompositeBuilder.WithPause(still.Frames[0].Pixels, motion, TimeSpan.FromSeconds(3)),
+            FaceState.Listening or FaceState.Thinking or FaceState.Working => PortraitCompositeBuilder.BuildActive(
+                still.Frames[0].Pixels, motion, pack.Provenance.SourceHash, state, compositeSettings),
             FaceState.Dreaming or FaceState.Asleep => PortraitCompositeBuilder.Repeat(motion, TimeSpan.FromSeconds(60)),
             _ => motion,
         };

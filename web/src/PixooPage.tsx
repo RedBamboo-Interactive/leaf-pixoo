@@ -261,7 +261,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
             {portrait&&<div className="space-y-2">
               <div className="flex items-center justify-between gap-3"><Label>Portrait clips</Label><Badge variant="outline" className="capitalize">{portrait.state.replace('-', ' ')}</Badge></div>
               <div className="flex flex-wrap gap-1.5" aria-label="Portrait clip generation status">
-                {portrait.clips.map(clip=><Badge key={clip.key??clip.state} variant={clip.phase==='ready'?'secondary':'outline'} className="capitalize">{(clip.key??clip.state).replaceAll('-',' ')} · {clip.phase}</Badge>)}
+                {portrait.clips.map(clip=><Badge key={clip.key??clip.state} variant={clip.phase==='ready'?'secondary':'outline'} className="capitalize">{(clip.key??clip.state).replaceAll('-',' ')} · {clip.phase}{clip.identicalFractionMinimum!=null&&clip.phase==='ready'?` · ${Math.round(clip.identicalFractionMinimum*100)}% stable`:''}</Badge>)}
               </div>
             </div>}
 

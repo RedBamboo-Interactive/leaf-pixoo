@@ -23,6 +23,10 @@ public sealed record PortraitClipSettings
     public int MaximumAttemptsPerClip { get; init; } = 2;
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
+    public int MaximumAlignmentShift { get; init; } = 12;
+    public double StaticPixelThreshold { get; init; } = 8;
+    public double MotionPixelThreshold { get; init; } = 5;
+    public int MinimumMotionComponentPixels { get; init; } = 3;
 }
 
 public sealed record DecodedVideoFrame(byte[] Pixels, int Width, int Height);
@@ -137,6 +141,37 @@ public static class PortraitClipProcessor
         if (referenceStill is not null) pixels = PortraitColorCorrector.Correct(pixels, referenceStill).ToArray();
         var frames = pixels.Select(frame => new RgbFrame(frame, frameDurationMs)).ToArray();
         return new FrameLoop(frames).Validate();
+    }
+
+    public static PortraitClipProcessingResult ProcessMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded,
+        PortraitClipSettings settings, byte[] referenceStill, byte[] sourceReference)
+        => ProcessMotionLoop(decoded, settings.Width, settings.Height,
+            new ImageRect(0, 0, settings.Width, settings.Height), settings.SampleStride,
+            settings.FrameDurationMs, settings.MaximumLoopFrames, referenceStill, sourceReference, settings);
+
+    public static PortraitClipProcessingResult ProcessMotionLoop(IReadOnlyList<DecodedVideoFrame> decoded,
+        int width, int height, ImageRect crop, int sampleStride, int frameDurationMs, int maximumFrames,
+        byte[] referenceStill, byte[] sourceReference, PortraitClipSettings settings)
+    {
+        if (decoded.Count < 2) throw new InvalidDataException("A loop needs at least two video frames so the duplicate closing frame can be dropped.");
+        if (sourceReference.Length != width * height * 3)
+            throw new ArgumentException("Source reference dimensions do not match the decoded clip.", nameof(sourceReference));
+        var alignments = new List<FrameAlignment>();
+        var reduced = new List<byte[]>();
+        foreach (var index in SampleIndices(decoded.Count, sampleStride, maximumFrames))
+        {
+            var frame = decoded[index];
+            if (frame.Width != width || frame.Height != height)
+                throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {width}x{height}.");
+            var alignment = PortraitFrameAligner.EstimateTranslation(sourceReference, frame.Pixels, width, height,
+                settings.MaximumAlignmentShift);
+            alignments.Add(alignment);
+            var aligned = PortraitFrameAligner.Align(sourceReference, frame.Pixels, width, height, alignment);
+            reduced.Add(PortraitPackBuilder.BoxDownsampleRgb(aligned, width, height, crop));
+        }
+        var corrected = PortraitColorCorrector.TransferColour(reduced, referenceStill);
+        return PortraitPixelStabilizer.Stabilize(corrected, referenceStill, frameDurationMs, alignments,
+            settings.StaticPixelThreshold, settings.MotionPixelThreshold, settings.MinimumMotionComponentPixels);
     }
 
     public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 100)

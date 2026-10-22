@@ -95,6 +95,66 @@ public sealed class GifPlaybackTests
     }
 
     [Theory]
+    [InlineData(FaceState.Listening, 80, 150, 1, 1)]
+    [InlineData(FaceState.Thinking, 100, 180, 3, 4)]
+    [InlineData(FaceState.Working, 100, 180, 3, 4)]
+    public void Active_composites_are_seeded_and_use_the_configured_long_pauses(
+        FaceState state, int minimumPauseFrames, int maximumPauseFrames, int minimumPlays, int maximumPlays)
+    {
+        var still = Solid(10);
+        var motion = new FrameLoop(Enumerable.Range(0, 20).Select(_ => new RgbFrame(Solid(220), 100)).ToArray());
+
+        var first = PortraitCompositeBuilder.BuildActive(still, motion, "stable-source-hash", state);
+        var second = PortraitCompositeBuilder.BuildActive(still, motion, "stable-source-hash", state);
+
+        Assert.Equal(first.Frames.SelectMany(frame => frame.Pixels), second.Frames.SelectMany(frame => frame.Pixels));
+        var starts = new List<int>();
+        for (var index = 1; index < first.Frames.Count; index++)
+            if (first.Frames[index - 1].Pixels[0] == 10 && first.Frames[index].Pixels[0] == 220) starts.Add(index);
+        Assert.InRange(starts.Count, minimumPlays, maximumPlays);
+        var previousMotionEnd = -1;
+        foreach (var start in starts)
+        {
+            var pauseFrames = start - previousMotionEnd - 1;
+            Assert.InRange(pauseFrames, minimumPauseFrames, maximumPauseFrames);
+            previousMotionEnd = start + 19;
+        }
+    }
+
+    [Fact]
+    public void Stabilizer_recovers_global_drift_locks_static_pixels_and_preserves_coherent_motion()
+    {
+        const int side = 384;
+        var stillSource = TexturedSource(side);
+        var shifts = new[] { (2, -2), (3, -1), (4, 0), (3, 1), (2, 2), (3, 1), (4, 0), (2, -1), (2, -2) };
+        var decoded = shifts.Select((shift, index) => new DecodedVideoFrame(
+            DriftingFrame(stillSource, side, shift.Item1, shift.Item2, index), side, side)).ToArray();
+
+        for (var index = 0; index < decoded.Length; index++)
+        {
+            var alignment = PortraitFrameAligner.EstimateTranslation(stillSource, decoded[index].Pixels, side, side);
+            Assert.True(alignment.Reliable, $"Frame {index} was not alignable (confidence {alignment.Confidence:F3}).");
+            Assert.InRange(alignment.ShiftX, shifts[index].Item1 - 1, shifts[index].Item1 + 1);
+            Assert.InRange(alignment.ShiftY, shifts[index].Item2 - 1, shifts[index].Item2 + 1);
+        }
+
+        var still = PortraitPackBuilder.BoxDownsampleRgb(stillSource, side, side, new ImageRect(0, 0, side, side));
+        var settings = new PortraitClipSettings { SampleStride = 1, MaximumLoopFrames = 8 };
+        var processed = PortraitClipProcessor.ProcessMotionLoop(decoded, settings, still, stillSource);
+
+        Assert.True(processed.IdenticalFractionMinimum >= .90,
+            $"Only {processed.IdenticalFractionMinimum:P1} of the least-stable frame was locked to the still.");
+        Assert.All(processed.Loop.Frames, frame =>
+            Assert.True(PortraitPixelStabilizer.IdenticalFraction(frame.Pixels, still) >= .90));
+
+        // The coherent 36x30 source blob maps to this small central band and must remain animated.
+        var blobChanged = processed.Loop.Frames.Skip(1).Take(processed.Loop.Frames.Count - 2)
+            .Any(frame => RegionDifference(frame.Pixels, still, 23, 28, 13, 9) > 80);
+        Assert.True(blobChanged, "The coherent local motion was removed.");
+        Assert.All(processed.Loop.Frames, frame => AssertNoIsolatedChangedPixel(frame.Pixels, still));
+    }
+
+    [Theory]
     [InlineData("2026-10-21T03:00:00+02:00", FaceState.Dreaming)]
     [InlineData("2026-10-21T23:45:00+02:00", FaceState.Asleep)]
     [InlineData("2026-10-21T07:00:00+02:00", FaceState.Asleep)]
@@ -135,6 +195,95 @@ public sealed class GifPlaybackTests
             result[index + 2] = (byte)Math.Clamp(result[index + 2] + blue, 0, 255);
         }
         return result;
+    }
+
+    private static byte[] TexturedSource(int side)
+    {
+        var pixels = new byte[side * side * 3];
+        for (var y = 0; y < side; y++)
+        for (var x = 0; x < side; x++)
+        {
+            var index = (y * side + x) * 3;
+            pixels[index] = (byte)(35 + (x * 7 + y * 3 + x * y % 31) % 180);
+            pixels[index + 1] = (byte)(30 + (x * 2 + y * 9 + x * y % 47) % 175);
+            pixels[index + 2] = (byte)(40 + (x * 5 + y * 5 + x * y % 23) % 170);
+        }
+        return pixels;
+    }
+
+    private static byte[] DriftingFrame(byte[] still, int side, int shiftX, int shiftY, int frameIndex)
+    {
+        var frame = still.ToArray();
+        var random = new Random(9000 + frameIndex);
+        for (var y = 0; y < side; y++)
+        for (var x = 0; x < side; x++)
+        {
+            var targetX = x + shiftX;
+            var targetY = y + shiftY;
+            if (targetX < 0 || targetX >= side || targetY < 0 || targetY >= side) continue;
+            var source = (y * side + x) * 3;
+            var target = (targetY * side + targetX) * 3;
+            for (var channel = 0; channel < 3; channel++)
+                frame[target + channel] = (byte)Math.Clamp(still[source + channel] + random.Next(-3, 4), 0, 255);
+        }
+
+        // A spatially and temporally coherent local motion region.
+        var blobX = 144 + frameIndex * 3 + shiftX;
+        var blobY = 174 + shiftY;
+        for (var y = blobY; y < blobY + 30; y++)
+        for (var x = blobX; x < blobX + 36; x++)
+        {
+            var offset = (y * side + x) * 3;
+            frame[offset] = 235; frame[offset + 1] = 72; frame[offset + 2] = 48;
+        }
+
+        // A one-frame 6x6 transient becomes one reduced pixel and must be rejected.
+        if (frameIndex == 4)
+        for (var y = 60 + shiftY; y < 66 + shiftY; y++)
+        for (var x = 300 + shiftX; x < 306 + shiftX; x++)
+        {
+            var offset = (y * side + x) * 3;
+            frame[offset] = frame[offset + 1] = frame[offset + 2] = 255;
+        }
+        return frame;
+    }
+
+    private static double RegionDifference(byte[] frame, byte[] still, int x, int y, int width, int height)
+    {
+        double difference = 0;
+        for (var py = y; py < y + height; py++)
+        for (var px = x; px < x + width; px++)
+        {
+            var offset = (py * 64 + px) * 3;
+            difference += Math.Abs(frame[offset] - still[offset]);
+            difference += Math.Abs(frame[offset + 1] - still[offset + 1]);
+            difference += Math.Abs(frame[offset + 2] - still[offset + 2]);
+        }
+        return difference;
+    }
+
+    private static void AssertNoIsolatedChangedPixel(byte[] frame, byte[] still)
+    {
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
+        {
+            var pixel = y * 64 + x;
+            var offset = pixel * 3;
+            var changed = frame[offset] != still[offset] || frame[offset + 1] != still[offset + 1] || frame[offset + 2] != still[offset + 2];
+            if (!changed) continue;
+            var neighbours = 0;
+            for (var dy = -1; dy <= 1; dy++)
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                var nx = x + dx; var ny = y + dy;
+                if (nx < 0 || nx >= 64 || ny < 0 || ny >= 64) continue;
+                var neighbour = (ny * 64 + nx) * 3;
+                if (frame[neighbour] != still[neighbour] || frame[neighbour + 1] != still[neighbour + 1]
+                    || frame[neighbour + 2] != still[neighbour + 2]) neighbours++;
+            }
+            Assert.True(neighbours > 0, $"Isolated flicker remained at ({x},{y}).");
+        }
     }
 
     private static GifInfo ParseGif(byte[] bytes)

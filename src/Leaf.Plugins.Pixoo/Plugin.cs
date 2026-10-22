@@ -50,7 +50,8 @@ public sealed class PixooPlugin : ILeafPlugin
         services.AddSingleton<IPortraitPackCache>(sp => sp.GetRequiredService<PortraitPackService>());
         services.AddSingleton<IFaceRenderer>(sp => new PortraitFaceRenderer(
             sp.GetRequiredService<IPortraitPackCache>(),
-            sp.GetRequiredService<ProceduralFaceRenderer>()));
+            sp.GetRequiredService<ProceduralFaceRenderer>(),
+            sp.GetRequiredService<CompositeSettings>()));
         services.AddSingleton(sp =>
         {
             var portraits = sp.GetRequiredService<PortraitPackService>();

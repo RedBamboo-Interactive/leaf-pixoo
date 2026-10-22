@@ -33,6 +33,8 @@ public sealed record PortraitClipProvenance(
     string Prompt,
     string Negative,
     string? Note,
+    double IdenticalFractionMinimum,
+    double IdenticalFractionMedian,
     DateTimeOffset GeneratedAt);
 
 public sealed record PortraitClip(FrameLoop Loop, PortraitClipProvenance Provenance);
@@ -78,7 +80,7 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-gif-v4-lightx2v";
+    public const string PipelineVersion = "portrait-gif-v5-lightx2v-stabilized";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -162,6 +164,12 @@ public sealed class PortraitPackBuilder
     {
         using var source = SKBitmap.Decode(encodedImage) ?? throw new InvalidDataException("Portrait could not be decoded.");
         return BoxDownsample(source, 64, 64);
+    }
+
+    internal static byte[] DecodeAndBoxResize(byte[] encodedImage, int width, int height)
+    {
+        using var source = SKBitmap.Decode(encodedImage) ?? throw new InvalidDataException("Portrait could not be decoded.");
+        return BoxDownsample(source, width, height);
     }
 
     internal static byte[] BoxDownsampleRgb(byte[] pixels, int width, int height, ImageRect crop,

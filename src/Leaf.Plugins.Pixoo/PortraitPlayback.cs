@@ -15,6 +15,18 @@ public static class PortraitColorCorrector
         if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
             throw new ArgumentException("Colour correction requires 64x64 RGB frames.");
         if (fadeFrames < 1) throw new ArgumentOutOfRangeException(nameof(fadeFrames));
+        var corrected = TransferColour(frames, still, smoothing);
+        return CloseSeam(corrected, still, fadeFrames);
+    }
+
+    internal static IReadOnlyList<byte[]> TransferColour(
+        IReadOnlyList<byte[]> frames,
+        byte[] still,
+        double smoothing = .35)
+    {
+        if (frames.Count == 0) throw new ArgumentException("At least one clip frame is required.", nameof(frames));
+        if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
+            throw new ArgumentException("Colour correction requires 64x64 RGB frames.");
         var target = Statistics(still);
         LabStatistics? running = null;
         var corrected = new List<byte[]>(frames.Count);
@@ -24,7 +36,12 @@ public static class PortraitColorCorrector
             running = running is null ? measured : LabStatistics.Lerp(running.Value, measured, smoothing);
             corrected.Add(Transfer(frame, running.Value, target));
         }
+        return corrected;
+    }
 
+    internal static IReadOnlyList<byte[]> CloseSeam(IReadOnlyList<byte[]> frames, byte[] still, int fadeFrames = 4)
+    {
+        var corrected = frames.Select(frame => frame.ToArray()).ToList();
         var fade = Math.Min(fadeFrames, corrected.Count);
         for (var index = 0; index < fade; index++)
         {
@@ -150,6 +167,13 @@ public sealed record CompositeSettings
     public TimeSpan CompositeMinimum { get; init; } = TimeSpan.FromSeconds(60);
     public TimeSpan CompositeMaximum { get; init; } = TimeSpan.FromSeconds(120);
     public int RestingCompositeCount { get; init; } = 3;
+    public TimeSpan ListeningPauseMinimum { get; init; } = TimeSpan.FromSeconds(8);
+    public TimeSpan ListeningPauseMaximum { get; init; } = TimeSpan.FromSeconds(15);
+    public int ListeningPlayCount { get; init; } = 1;
+    public TimeSpan ThinkingPauseMinimum { get; init; } = TimeSpan.FromSeconds(10);
+    public TimeSpan ThinkingPauseMaximum { get; init; } = TimeSpan.FromSeconds(18);
+    public int ThinkingPlayMinimum { get; init; } = 3;
+    public int ThinkingPlayMaximum { get; init; } = 4;
 }
 
 public static class PortraitCompositeBuilder
@@ -172,6 +196,29 @@ public static class PortraitCompositeBuilder
         var frames = Pause(still, pause, frameDurationMs)
             .Concat(Normalize(motion, frameDurationMs))
             .ToArray();
+        return new FrameLoop(frames).Validate();
+    }
+
+    public static FrameLoop BuildActive(byte[] still, FrameLoop motion, string sourceHash, FaceState state,
+        CompositeSettings? settings = null)
+    {
+        settings ??= new();
+        var random = new Random(Seed(sourceHash + ":" + state, 0));
+        var thinking = state is FaceState.Thinking or FaceState.Working;
+        var plays = thinking
+            ? random.Next(settings.ThinkingPlayMinimum, settings.ThinkingPlayMaximum + 1)
+            : settings.ListeningPlayCount;
+        var minimum = thinking ? settings.ThinkingPauseMinimum : settings.ListeningPauseMinimum;
+        var maximum = thinking ? settings.ThinkingPauseMaximum : settings.ListeningPauseMaximum;
+        var frames = new List<RgbFrame>();
+        for (var play = 0; play < plays; play++)
+        {
+            var seconds = minimum.TotalSeconds + random.NextDouble() * (maximum - minimum).TotalSeconds;
+            frames.AddRange(Pause(still, TimeSpan.FromSeconds(seconds), settings.FrameDurationMs));
+            frames.AddRange(Normalize(motion, settings.FrameDurationMs));
+        }
+        frames[0] = new(still.ToArray(), settings.FrameDurationMs);
+        frames[^1] = new(still.ToArray(), settings.FrameDurationMs);
         return new FrameLoop(frames).Validate();
     }
 
