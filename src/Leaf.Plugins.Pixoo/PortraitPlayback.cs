@@ -117,9 +117,10 @@ public static class PortraitColorCorrector
         var x = .95047 * Inverse(fx);
         var y = Inverse(fy);
         var z = 1.08883 * Inverse(fz);
-        var r = x * 3.2404542 + y * -.969266 + z * .0556434;
-        var g = x * -.96854 + y * 1.8760108 + z * -.2040259;
-        var b = x * .0556301 + y * -.2039769 + z * 1.0572252;
+        // Inverse of the sRGB (D65) RGB->XYZ matrix used in ToLab, row by row.
+        var r = x * 3.2404542 + y * -1.5371385 + z * -.4985314;
+        var g = x * -.969266 + y * 1.8760108 + z * .041556;
+        var b = x * .0556434 + y * -.2040259 + z * 1.0572252;
         static byte Gamma(double value)
         {
             var channel = value <= .0031308 ? 12.92 * value : 1.055 * Math.Pow(Math.Max(0, value), 1 / 2.4) - .055;

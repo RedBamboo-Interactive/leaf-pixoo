@@ -195,3 +195,46 @@ public sealed class GifPlaybackTests
 
     private sealed record GifInfo(int Width, int Height, int FrameCount, IReadOnlyList<int> Delays, bool LoopsForever);
 }
+
+public sealed class ColourCorrectionFidelityTests
+{
+    private static byte[] Portrait()
+    {
+        // A varied synthetic image: skin, hair, fabric and background tones across the frame.
+        var pixels = new byte[RgbFrame.ByteCount];
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
+        {
+            var i = (y * 64 + x) * 3;
+            pixels[i] = (byte)(60 + (x * 3 + y) % 190);
+            pixels[i + 1] = (byte)(40 + (x + y * 2) % 170);
+            pixels[i + 2] = (byte)(30 + (x * y) % 150);
+        }
+        return pixels;
+    }
+
+    [Fact]
+    public void Frames_identical_to_the_still_come_back_unchanged()
+    {
+        var still = Portrait();
+        var frames = Enumerable.Range(0, 12).Select(_ => still.ToArray()).ToArray();
+        var corrected = PortraitColorCorrector.Correct(frames, still);
+        foreach (var frame in corrected)
+            Assert.True(PortraitColorCorrector.MeanAbsoluteDifference(frame, still) < 1.0);
+    }
+
+    [Fact]
+    public void A_uniformly_darkened_clip_is_restored_without_a_colour_cast()
+    {
+        var still = Portrait();
+        var dark = still.Select(value => (byte)(value * .85)).ToArray();
+        var corrected = PortraitColorCorrector.Correct(Enumerable.Range(0, 12).Select(_ => dark.ToArray()).ToArray(), still);
+        var middle = corrected[6];
+        for (var channel = 0; channel < 3; channel++)
+        {
+            double sum = 0;
+            for (var i = channel; i < still.Length; i += 3) sum += middle[i] - still[i];
+            Assert.InRange(sum / (still.Length / 3), -4, 4);
+        }
+    }
+}
