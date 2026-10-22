@@ -15,6 +15,7 @@ public sealed class PixooService(
     IAgentEventMapper mapper,
     PortraitPackService portraits,
     DisplayPlaybackStatusStore playback,
+    CurrentDisplayStore currentDisplays,
     PixooPlaybackSettings playbackSettings)
 {
     public const string DeviceEntityType = "pixoo-device";
@@ -47,14 +48,15 @@ public sealed class PixooService(
         var device = requested is { } id ? devices.FirstOrDefault(d => d.Id == id) : devices.FirstOrDefault();
         if (device is null) return null;
         portraits.Schedule(device.AgentId);
-        var snapshot = emulator.Snapshot(device);
+        var current = currentDisplays.Get(device.Id);
         var delivery = playback.Get(device.Id);
         if (queues.TryGetValue(device.Id, out var queued) && queued.Queue.LastError is { } queueError)
             delivery = delivery with { DeliveryError = delivery.DeliveryError ?? queueError };
-        if (snapshot.Frames.Count > 0) return snapshot with { Playback = delivery };
+        if (current is not null) return new(device, current.Push.State, current.Push.Gesture,
+            CapFrames(current.Push.Loop.Frames), currentDisplays.History(device.Id), delivery);
         var state = states.GetOrAdd(device.Id, _ => new());
         var program = renderer.Render(device.AgentId, state.Current, device.AgentColor, device.Brightness, state.Gesture);
-        return snapshot with { State = state.Current, Gesture = state.Gesture, Frames = program.InitialLoop.Frames, Playback = delivery };
+        return new(device, state.Current, state.Gesture, CapFrames(program.InitialLoop.Frames), [], delivery);
     }
 
     public async Task<DisplayPlaybackStatus> PlaybackAsync(PixooCaller caller, Guid deviceId, CancellationToken ct)
@@ -65,6 +67,30 @@ public sealed class PixooService(
         if (queues.TryGetValue(deviceId, out var queued) && queued.Queue.LastError is { } error)
             status = status with { DeliveryError = status.DeliveryError ?? error };
         return status;
+    }
+
+    public async Task<DisplayStateSummary> DisplayStateAsync(PixooCaller caller, Guid deviceId, CancellationToken ct)
+    {
+        _ = await OwnedDeviceAsync(caller, deviceId, ct);
+        var current = currentDisplays.Get(deviceId);
+        var status = PlaybackWithQueueError(deviceId);
+        if (current is not null) return new(current.Push.State, current.Push.Gesture, current.LoopKey,
+            current.Push.Loop.Frames.Count, current.FrameDurationMs, status);
+        var state = states.GetOrAdd(deviceId, _ => new());
+        return new(state.Current, state.Gesture, null, 0, playbackSettings.GifFrameDurationMs, status);
+    }
+
+    public async Task<CurrentGif?> CurrentGifAsync(PixooCaller caller, Guid deviceId, CancellationToken ct)
+    {
+        _ = await OwnedDeviceAsync(caller, deviceId, ct);
+        var current = currentDisplays.Get(deviceId);
+        return current is null ? null : new(current.LoopKey, current.GifBytes);
+    }
+
+    public async Task<IReadOnlyList<PushReceipt>> HistoryAsync(PixooCaller caller, Guid deviceId, CancellationToken ct)
+    {
+        _ = await OwnedDeviceAsync(caller, deviceId, ct);
+        return currentDisplays.History(deviceId);
     }
 
     public async Task<PixooDevice> CreateAsync(PixooCaller caller, DeviceChange request, CancellationToken ct)
@@ -100,13 +126,13 @@ public sealed class PixooService(
         return devices.Length > 0;
     }
 
-    public async Task<DeviceSnapshot> SimulateAsync(PixooCaller caller, Guid deviceId, FaceState state, FaceGesture? gesture, CancellationToken ct)
+    public async Task<DisplayStateSummary> SimulateAsync(PixooCaller caller, Guid deviceId, FaceState state, FaceGesture? gesture, CancellationToken ct)
     {
         var device = (await DevicesAsync(caller, ct)).FirstOrDefault(d => d.Id == deviceId)
             ?? throw new KeyNotFoundException("Pixoo device not found.");
         await Push(device, state, gesture, gesture?.ToString().ToLowerInvariant() ?? "simulate", ct);
         await queues[device.Id].Queue.DrainAsync(ct);
-        return (await SnapshotAsync(caller, device.Id, ct))!;
+        return await DisplayStateAsync(caller, device.Id, ct);
     }
 
     public async Task<PortraitPackStatus> RebuildPortraitAsync(PixooCaller caller, Guid agentId, bool force, CancellationToken ct)
@@ -219,6 +245,32 @@ public sealed class PixooService(
         return request with { Name = request.Name.Trim(), Host = string.IsNullOrWhiteSpace(request.Host) ? null : request.Host.Trim(), AgentColor = AgentColor(agent) };
     }
 
+    private async Task<PixooDevice> OwnedDeviceAsync(PixooCaller caller, Guid id, CancellationToken ct)
+        => RequireOwnedDevice(await entities.GetAsync(id, ct), caller);
+
+    internal static PixooDevice RequireOwnedDevice(LeafEntity? entity, PixooCaller caller)
+    {
+        if (entity is null || entity.TypeSlug != DeviceEntityType
+            || entity.Data["owner_id"]?.GetValue<string>() != caller.UserId
+            || caller.AgentId is not null && entity.Data["agent_id"]?.GetValue<string>() != caller.AgentId)
+            throw new KeyNotFoundException("Pixoo device not found.");
+        return Decode(entity);
+    }
+
+    private DisplayPlaybackStatus PlaybackWithQueueError(Guid deviceId)
+    {
+        var status = playback.Get(deviceId);
+        if (queues.TryGetValue(deviceId, out var queued) && queued.Queue.LastError is { } error)
+            status = status with { DeliveryError = status.DeliveryError ?? error };
+        return status;
+    }
+
+    private static IReadOnlyList<RgbFrame> CapFrames(IReadOnlyList<RgbFrame> frames, int maximum = 200)
+    {
+        if (frames.Count <= maximum) return frames;
+        return Enumerable.Range(0, maximum).Select(index => frames[index * frames.Count / maximum]).ToArray();
+    }
+
     private static JsonObject Encode(string ownerId, DeviceChange value) => Encode(ownerId, value.Name, value.Kind, value.Host, value.Brightness,
         value.AgentId, value.AgentColor, value.MinimumPushGapMs, value.HardwareEnabled);
 
@@ -236,7 +288,7 @@ public sealed class PixooService(
         ["hardware_enabled"] = hardwareEnabled,
     };
 
-    private static PixooDevice Decode(LeafEntity entity)
+    internal static PixooDevice Decode(LeafEntity entity)
     {
         var d = entity.Data;
         if (!Guid.TryParse(d["agent_id"]?.GetValue<string>(), out var agentId)) throw new InvalidOperationException("Pixoo device has no valid Agent binding.");

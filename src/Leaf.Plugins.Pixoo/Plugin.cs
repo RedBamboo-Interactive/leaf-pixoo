@@ -29,6 +29,7 @@ public sealed class PixooPlugin : ILeafPlugin
         services.AddSingleton(PixooPlaybackSettings.FromEnvironment());
         services.AddSingleton(new CompositeSettings());
         services.AddSingleton<DisplayPlaybackStatusStore>();
+        services.AddSingleton<CurrentDisplayStore>();
         services.AddSingleton<IGifEncoder, FfmpegGifEncoder>();
         services.AddSingleton<ILanGifHost, LanGifHost>();
         services.AddSingleton<ProceduralFaceRenderer>();
@@ -65,6 +66,7 @@ public sealed class PixooPlugin : ILeafPlugin
                 sp.GetRequiredService<IAgentEventMapper>(),
                 portraits,
                 sp.GetRequiredService<DisplayPlaybackStatusStore>(),
+                sp.GetRequiredService<CurrentDisplayStore>(),
                 sp.GetRequiredService<PixooPlaybackSettings>());
             portraits.PackReady += service.RefreshPortraitAsync;
             return service;
@@ -117,6 +119,16 @@ public sealed class PixooPlugin : ILeafPlugin
             await service.SnapshotAsync(PixooCaller.From(context.User), deviceId, ct) is { } snapshot ? Results.Ok(snapshot) : Results.NotFound());
         group.MapGet("/devices/{id:guid}/playback", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
             Results.Ok(await service.PlaybackAsync(PixooCaller.From(context.User), id, ct)));
+        group.MapGet("/devices/{id:guid}/state", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
+            Results.Ok(await service.DisplayStateAsync(PixooCaller.From(context.User), id, ct)));
+        group.MapGet("/devices/{id:guid}/history", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
+            Results.Ok(await service.HistoryAsync(PixooCaller.From(context.User), id, ct)));
+        group.MapGet("/devices/{id:guid}/current.gif", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
+        {
+            var gif = await service.CurrentGifAsync(PixooCaller.From(context.User), id, ct);
+            if (gif is null) { context.Response.StatusCode = StatusCodes.Status404NotFound; return; }
+            await CurrentGifHttp.WriteAsync(context, gif, ct);
+        });
         group.MapPost("/devices/{id:guid}/simulate", async (Guid id, HttpContext context, PixooService service, CancellationToken ct) =>
         {
             var request = await Read<SimulateRequest>(context, ct);

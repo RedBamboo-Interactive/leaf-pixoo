@@ -1,5 +1,6 @@
 const { chromium } = require('../web/node_modules/playwright');
 const path = require('node:path');
+const fs = require('node:fs');
 const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs');
 
 (async () => {
@@ -20,7 +21,7 @@ const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs'
         if (scenario === 'one') await page.getByRole('img', { name: /pixel face/ }).waitFor();
         if (scenario === 'one') await page.getByText('Bound Agent', { exact: true }).waitFor();
         if (scenario === 'two') await page.getByText('Emulator · Second Agent', { exact: true }).waitFor();
-        if (scenario === 'two' && viewport === 'desktop') await page.getByText('Select a display', { exact: true }).waitFor();
+        if (scenario === 'two' && viewport === 'desktop') await page.getByRole('img', { name: /pixel face/ }).waitFor();
         await page.evaluate(() => window.scrollTo(0, 0));
         await page.screenshot({
           path: path.join(artifacts, `${scenario}-${viewport}.png`),
@@ -32,6 +33,17 @@ const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs'
           await page.getByRole('img', { name: /pixel face/ }).waitFor();
         }
         if (scenario === 'one' && viewport === 'desktop') {
+          await page.getByRole('button', { name: 'speaking', exact: true }).click();
+          await page.getByTestId('current-state').getByText('speaking', { exact: true }).waitFor();
+          await page.waitForTimeout(250);
+          const liveA = path.join(artifacts, 'live-animation-frame-a.png');
+          const liveB = path.join(artifacts, 'live-animation-frame-b.png');
+          await page.screenshot({ path: liveA });
+          await page.waitForTimeout(220);
+          await page.screenshot({ path: liveB });
+          if (Buffer.compare(fs.readFileSync(liveA), fs.readFileSync(liveB)) === 0)
+            throw new Error('LED preview did not advance between live screenshots');
+          screenshots += 2;
           await page.getByLabel('Name').fill('Lounge display');
           await page.getByLabel('Name').press('Enter');
           await page.getByRole('button', { name: /Lounge display/ }).waitFor();

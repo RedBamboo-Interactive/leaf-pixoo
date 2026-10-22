@@ -9,7 +9,7 @@ const SIZE=64
  */
 export function LedMatrix({frames,frame,label}:{frames:Frame[];frame:number;label:string}){
   const canvas=useRef<HTMLCanvasElement>(null)
-  const decoded=useMemo(()=>frames.map(item=>toImageData(item.pixels)),[frames])
+  const decoded=useMemo(()=>frames.map(toImageData),[frames])
   const source=useMemo(()=>{
     const element=document.createElement('canvas')
     element.width=SIZE;element.height=SIZE
@@ -83,8 +83,10 @@ export function LedMatrix({frames,frame,label}:{frames:Frame[];frame:number;labe
   return <canvas ref={canvas} className="pixoo-matrix" role="img" aria-label={label}/>
 }
 
-function toImageData(value?:string){
+function toImageData(frame:Frame){
+  if(frame.imageData)return frame.imageData
   const data=new ImageData(SIZE,SIZE)
+  const value=frame.pixels
   if(!value)return data
   const raw=atob(value)
   for(let source=0,target=0;source<raw.length&&target<data.data.length;source+=3,target+=4){

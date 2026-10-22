@@ -6,8 +6,8 @@ import {
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
-import {createDevice,current,listAgents,listDevices,playback,portraitStatus,simulate,updateDevice} from './api'
-import type {Agent,Device,FaceGesture,FaceState,PortraitStatus,Snapshot} from './types'
+import {createDevice,current,currentGif,displayState,listAgents,listDevices,portraitStatus,pushHistory,simulate,updateDevice} from './api'
+import type {Agent,Device,DisplayState,FaceGesture,FaceState,Frame,PortraitStatus,Snapshot} from './types'
 import {LedMatrix} from './LedMatrix'
 
 const states:FaceState[]=['dark','resting','listening','thinking','speaking','working','dreaming','asleep']
@@ -26,6 +26,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   const [pickerMode,setPickerMode]=useState<PickerMode>('bind')
   const [agentPickerOpen,setAgentPickerOpen]=useState(false)
   const [view,setView]=useState<Snapshot|null>(null)
+  const [live,setLive]=useState<{deviceId:string;value:DisplayState}|null>(null)
   const [portrait,setPortrait]=useState<PortraitStatus|null>(null)
   const [frame,setFrame]=useState(0)
   const [loading,setLoading]=useState(true)
@@ -66,19 +67,54 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   },[device?.agentId])
 
   useEffect(()=>{
-    if(!selected){setView(null);return}
-    let alive=true
-    void current(selected).then(snapshot=>{if(alive)setView(snapshot)}).catch(reason=>setError(message(reason)))
-    return()=>{alive=false}
-  },[selected])
+    if(!selected||!device){setView(null);setLive(null);return}
+    setView({device,state:'dark',frames:[],history:[],playback:{}})
+    setLive(null)
+  },[selected,device?.id])
 
   useEffect(()=>{
     if(!selected)return
     let alive=true
-    const refresh=()=>void playback(selected).then(status=>setView(value=>alive&&value?{...value,playback:status}:value)).catch(()=>{})
-    const timer=window.setInterval(refresh,5000)
-    return()=>{alive=false;window.clearInterval(timer)}
+    let timer:number|undefined
+    const refresh=async()=>{
+      if(document.hidden||!alive)return
+      try{
+        const [state,history]=await Promise.all([displayState(selected),pushHistory(selected)])
+        if(!alive)return
+        setLive({deviceId:selected,value:state})
+        setView(value=>value?{...value,state:state.state,gesture:state.gesture,history,playback:state.playback}:value)
+      }catch(reason){if(alive)setError(message(reason))}
+    }
+    const start=()=>{
+      if(timer!==undefined)window.clearInterval(timer)
+      timer=undefined
+      if(document.hidden||!alive)return
+      void refresh()
+      timer=window.setInterval(()=>void refresh(),1500)
+    }
+    const visibility=()=>start()
+    document.addEventListener('visibilitychange',visibility)
+    start()
+    return()=>{alive=false;if(timer!==undefined)window.clearInterval(timer);document.removeEventListener('visibilitychange',visibility)}
   },[selected])
+
+  const liveState=live?.deviceId===selected?live.value:null
+
+  useEffect(()=>{
+    const loopKey=liveState?.loopKey
+    if(!selected||!loopKey)return
+    let alive=true
+    void (async()=>{
+      let frames:Frame[]|null=null
+      if(imageDecoderAvailable()){
+        const gif=await currentGif(selected)
+        if(gif)try{frames=await decodeGif(gif,liveState.frameDurationMs,liveState.frameCount)}catch{frames=null}
+      }
+      if(!frames)frames=(await current(selected)).frames
+      if(alive)setView(value=>value?{...value,frames}:value)
+    })().catch(reason=>{if(alive)setError(message(reason))})
+    return()=>{alive=false}
+  },[selected,liveState?.loopKey])
 
   useEffect(()=>{
     if(!view?.frames.length)return
@@ -87,7 +123,7 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
     return()=>window.clearTimeout(timer)
   },[view,frame])
 
-  useEffect(()=>setFrame(0),[view?.state,view?.gesture,selected])
+  useEffect(()=>setFrame(0),[liveState?.loopKey,selected])
 
   const selectDisplay=(id:string)=>{
     setSelected(id)
@@ -97,7 +133,11 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
   const act=async(state:FaceState,gesture?:FaceGesture)=>{
     if(!selected)return
     setBusy(true);setError('')
-    try{setView(await simulate(selected,state,gesture))}
+    try{
+      const next=await simulate(selected,state,gesture)
+      setLive({deviceId:selected,value:next})
+      setView(value=>value?{...value,state:next.state,gesture:next.gesture,playback:next.playback}:value)
+    }
     catch(reason){setError(message(reason))}
     finally{setBusy(false)}
   }
@@ -111,7 +151,6 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
     try{
       const saved=await updateDevice(next)
       setDevices(items=>items.map(item=>item.id===saved.id?saved:item))
-      setView(await current(saved.id))
     }catch(reason){
       setDevices(items=>items.map(item=>item.id===previous.id?previous:item))
       setError(message(reason))
@@ -141,7 +180,6 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
       const made=await createDevice(agent.id,'Display '+(devices.length+1))
       setDevices(items=>[...items.filter(item=>item.id!==made.id),made])
       selectDisplay(made.id)
-      setView(await current(made.id))
     }catch(reason){setError(message(reason))}
     finally{setBusy(false)}
   }
@@ -225,10 +263,12 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
           <LedMatrix frames={view?.frames??[]} frame={frame} label={`${view?.state??'dark'} pixel face`}/>
           <div className="pixoo-bezel-foot"><span className="pixoo-speaker"/><b>PIXOO</b><span className="pixoo-power"/></div>
         </div>
-        <div className="mt-4 flex items-center gap-2 text-sm capitalize text-text-muted" aria-live="polite">
-          <span className="size-2 rounded-full bg-primary shadow-[0_0_8px_var(--primary)]" aria-hidden="true"/>
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-sm capitalize text-text-muted" aria-live="polite">
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-success"><span className="size-2 animate-pulse rounded-full bg-success" aria-hidden="true"/>Live</span>
           <Badge variant="secondary"><span data-testid="current-state">{view?.state??'dark'}</span></Badge>
           {view?.gesture&&<Badge variant="outline">gesture · {view.gesture}</Badge>}
+          {view?.playback?.playingGif&&<span className="text-xs">{view.playback.playingGif}</span>}
+          {view?.playback?.lastFetchedAt&&<span className="text-xs tabular-nums">fetched {new Date(view.playback.lastFetchedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>}
         </div>
       </section>
 
@@ -347,4 +387,31 @@ function AgentPicker({open,agents,selectedId,mode,onOpenChange,onSelect}:{
 }
 
 function message(value:unknown){return value instanceof Error?value.message:String(value)}
+
+type GifDecoder={tracks:{ready:Promise<void>;selectedTrack?:{frameCount:number}};decode:(options:{frameIndex:number;completeFramesOnly?:boolean})=>Promise<{image:CanvasImageSource&{close?:()=>void}}> ;close:()=>void}
+type GifDecoderConstructor=new(options:{data:ArrayBuffer;type:string})=>GifDecoder
+
+function imageDecoderAvailable(){return typeof (window as unknown as {ImageDecoder?:GifDecoderConstructor}).ImageDecoder==='function'}
+
+async function decodeGif(blob:Blob,durationMs:number,expectedFrameCount:number):Promise<Frame[]>{
+  const Decoder=(window as unknown as {ImageDecoder?:GifDecoderConstructor}).ImageDecoder
+  if(!Decoder)throw new Error('Animated GIF decoding is unavailable')
+  const decoder=new Decoder({data:await blob.arrayBuffer(),type:'image/gif'})
+  try{
+    await decoder.tracks.ready
+    const count=decoder.tracks.selectedTrack?.frameCount||expectedFrameCount
+    if(count<1)throw new Error('GIF contains no frames')
+    const canvas=document.createElement('canvas');canvas.width=64;canvas.height=64
+    const context=canvas.getContext('2d',{willReadFrequently:true})!
+    const frames:Frame[]=[]
+    for(let index=0;index<count;index++){
+      const decoded=await decoder.decode({frameIndex:index,completeFramesOnly:true})
+      context.clearRect(0,0,64,64)
+      context.drawImage(decoded.image,0,0,64,64)
+      frames.push({imageData:context.getImageData(0,0,64,64),durationMs})
+      decoded.image.close?.()
+    }
+    return frames
+  }finally{decoder.close()}
+}
 

@@ -1,4 +1,4 @@
-import type {Agent,Device,FaceGesture,FaceState,Frame,PlaybackStatus,PortraitStatus,Snapshot} from './types'
+import type {Agent,Device,DisplayState,FaceGesture,FaceState,Frame,PortraitStatus,Receipt,Snapshot} from './types'
 
 declare const __PIXOO_HAS_LOCAL_PREVIEW__:boolean
 
@@ -12,6 +12,7 @@ const secondary:Device={id:ids.second,name:'Studio shelf',kind:'emulator',bright
 const scenario=params.get('scenario')??'one'
 let devices:Device[]=scenario==='empty'?[]:scenario==='two'?[primary,secondary]:[primary]
 const snapshots=new Map<string,Snapshot>(devices.map(device=>[device.id,makeSnapshot(device)]))
+const loopKeys=new Map<string,number>(devices.map(device=>[device.id,1]))
 let preview:Partial<Record<FaceState,Frame[]>>|null=null
 let previewRequest:Promise<void>|null=null
 
@@ -37,9 +38,25 @@ export async function current(deviceId:string){
   snapshots.set(deviceId,next)
   return next
 }
-export async function playback(deviceId:string){
-  if(harness)return (snapshots.get(deviceId)?.playback??{}) as PlaybackStatus
-  return json<PlaybackStatus>('/devices/'+deviceId+'/playback')
+export async function displayState(deviceId:string):Promise<DisplayState>{
+  if(harness){
+    const snapshot=snapshots.get(deviceId)
+    if(!snapshot)throw new Error('Display not found')
+    return {state:snapshot.state,gesture:snapshot.gesture,loopKey:`harness-${loopKeys.get(deviceId)??1}`,
+      frameCount:snapshot.frames.length,frameDurationMs:snapshot.frames[0]?.durationMs??100,playback:snapshot.playback??{}}
+  }
+  return json<DisplayState>('/devices/'+deviceId+'/state')
+}
+export async function pushHistory(deviceId:string){
+  if(harness)return snapshots.get(deviceId)?.history??[]
+  return json<Receipt[]>('/devices/'+deviceId+'/history')
+}
+export async function currentGif(deviceId:string){
+  if(harness)return null
+  const response=await fetch(`${base}/devices/${deviceId}/current.gif`,{credentials:'same-origin',cache:'no-cache'})
+  if(response.status===404)return null
+  if(!response.ok)throw new Error(`${response.status} ${response.statusText}`)
+  return response.blob()
 }
 export async function updateDevice(value:Device){
   if(harness){
@@ -58,6 +75,7 @@ export async function createDevice(agentId:string,name='Display'){
     const made={id:crypto.randomUUID(),...value}
     devices=[...devices,made]
     snapshots.set(made.id,{...makeSnapshot(made),frames:preview?.resting??render('resting',made.agentColor,made.brightness)})
+    loopKeys.set(made.id,1)
     return made
   }
   return json<Device>('/devices',{method:'POST',body:JSON.stringify(value)})
@@ -71,9 +89,10 @@ export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGest
     const frames=gesture?render(state,device.agentColor,device.brightness,gesture):preview?.[state]??render(state,device.agentColor,device.brightness)
     const snapshot={device,state,gesture,frames,history:[{pushedAt:new Date().toISOString(),state,gesture,cause:gesture??'simulate',frameCount:frames.length},...previous.history].slice(0,8),playback:{playingGif:state+'-preview'}}
     snapshots.set(deviceId,snapshot)
-    return snapshot
+    loopKeys.set(deviceId,(loopKeys.get(deviceId)??0)+1)
+    return displayState(deviceId)
   }
-  return json<Snapshot>(`/devices/${deviceId}/simulate`,{method:'POST',body:JSON.stringify({state,gesture})})
+  return json<DisplayState>(`/devices/${deviceId}/simulate`,{method:'POST',body:JSON.stringify({state,gesture})})
 }
 
 function makeSnapshot(device:Device):Snapshot{

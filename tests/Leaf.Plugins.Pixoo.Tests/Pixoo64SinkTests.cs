@@ -77,7 +77,7 @@ public sealed class Pixoo64SinkTests
 
     private static Pixoo64Sink Sink(FakePixoo handler, bool fetched = true, DisplayPlaybackStatusStore? statuses = null)
         => new(new HttpClient(handler), new FakeGifHost(fetched), new FakeGifEncoder(),
-            statuses ?? new(), new() { FetchTimeout = TimeSpan.FromMilliseconds(10) });
+            statuses ?? new(), new CurrentDisplayStore(), new() { FetchTimeout = TimeSpan.FromMilliseconds(10) });
 
     private sealed record SeenRequest(string Command, bool? Chunked, long? ContentLength, long BodyLength);
 

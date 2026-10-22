@@ -9,30 +9,20 @@ public interface IDisplaySink
     Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default);
 }
 
-public sealed class EmulatorSink(DisplayPlaybackStatusStore statuses, IPushClock? clock = null) : IDisplaySink
+public sealed class EmulatorSink(
+    DisplayPlaybackStatusStore statuses,
+    IGifEncoder gifEncoder,
+    CurrentDisplayStore current,
+    PixooPlaybackSettings settings,
+    IPushClock? clock = null) : IDisplaySink
 {
-    private sealed record Entry(DisplayPush Push, DateTimeOffset PushedAt);
-    private readonly ConcurrentDictionary<Guid, Entry> current = new();
-    private readonly ConcurrentDictionary<Guid, ConcurrentQueue<PushReceipt>> history = new();
-
-    public Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
+    public async Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
     {
         push.Loop.Validate();
         var now = clock?.UtcNow ?? DateTimeOffset.UtcNow;
-        current[device.Id] = new(push, now);
+        var gif = await gifEncoder.EncodeAsync(push.Loop, settings.GifFrameDurationMs, ct);
         statuses.Playing(device.Id, push.AnimationName, null, null);
-        var queue = history.GetOrAdd(device.Id, _ => new());
-        queue.Enqueue(new(now, push.State, push.Gesture, push.Cause, push.Loop.Frames.Count));
-        while (queue.Count > 20) queue.TryDequeue(out _);
-        return Task.CompletedTask;
-    }
-
-    public DeviceSnapshot Snapshot(PixooDevice device)
-    {
-        current.TryGetValue(device.Id, out var value);
-        var frames = value?.Push.Loop.Frames ?? [];
-        var receipts = history.TryGetValue(device.Id, out var queue) ? queue.Reverse().ToArray() : [];
-        return new(device, value?.Push.State ?? FaceState.Dark, value?.Push.Gesture, frames, receipts, statuses.Get(device.Id));
+        current.Set(device, push, push.Loop, gif, settings.GifFrameDurationMs, now);
     }
 }
 
@@ -45,6 +35,7 @@ public sealed class Pixoo64Sink(
     ILanGifHost gifHost,
     IGifEncoder gifEncoder,
     DisplayPlaybackStatusStore statuses,
+    CurrentDisplayStore current,
     PixooPlaybackSettings settings) : IDisplaySink
 {
     public async Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
@@ -58,6 +49,8 @@ public sealed class Pixoo64Sink(
         {
             await Post(endpoint, new JsonObject { ["Command"] = "Channel/OnOffScreen", ["OnOff"] = 0 }, ct);
             statuses.Dark(device.Id);
+            var darkGif = await gifEncoder.EncodeAsync(push.Loop, settings.GifFrameDurationMs, ct);
+            current.Set(device, push, push.Loop, darkGif, settings.GifFrameDurationMs);
             return;
         }
 
@@ -76,15 +69,18 @@ public sealed class Pixoo64Sink(
             if (fetch is null) throw new GifDeliveryException(
                 "Display could not fetch its animation: check the Leaf Pixoo GIF firewall rule.");
             statuses.Playing(device.Id, push.AnimationName, fetch, null);
+            current.Set(device, push, push.Loop, gif, settings.GifFrameDurationMs);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var message = ex is GifDeliveryException
                 ? ex.Message
                 : "Display could not fetch its animation: check the Leaf Pixoo GIF firewall rule. " + ex.Message;
-            await PushFramesFallback(endpoint, push.Loop, ct);
+            var fallback = await PushFramesFallback(endpoint, push.Loop, ct);
             await Post(endpoint, new JsonObject { ["Command"] = "Channel/OnOffScreen", ["OnOff"] = 1 }, ct);
             statuses.Playing(device.Id, push.AnimationName + " (frame fallback)", null, message);
+            var fallbackGif = await gifEncoder.EncodeAsync(fallback, settings.GifFrameDurationMs, ct);
+            current.Set(device, push, fallback, fallbackGif, settings.GifFrameDurationMs);
         }
     }
 
@@ -115,11 +111,12 @@ public sealed class Pixoo64Sink(
         return new FrameLoop(frames).Validate();
     }
 
-    private async Task PushFramesFallback(Uri endpoint, FrameLoop source, CancellationToken ct)
+    private async Task<FrameLoop> PushFramesFallback(Uri endpoint, FrameLoop source, CancellationToken ct)
     {
         var loop = BuildFallbackLoop(source);
         await Post(endpoint, new JsonObject { ["Command"] = "Draw/ResetHttpGifId" }, ct);
         foreach (var payload in BuildFramePayloads(loop, picId: 1)) await Post(endpoint, payload, ct);
+        return loop;
     }
 
     private async Task Post(Uri endpoint, JsonObject payload, CancellationToken ct)
