@@ -52,69 +52,16 @@ public interface IGifEncoder
 
 public sealed class FfmpegGifEncoder : IGifEncoder
 {
-    public async Task<byte[]> EncodeAsync(FrameLoop loop, int frameDurationMs, CancellationToken ct = default)
+    public Task<byte[]> EncodeAsync(FrameLoop loop, int frameDurationMs, CancellationToken ct = default)
     {
         loop.Validate();
         if (frameDurationMs <= 0 || 1000 % frameDurationMs != 0)
             throw new ArgumentOutOfRangeException(nameof(frameDurationMs), "GIF timing must divide one second exactly.");
-        var fps = 1000 / frameDurationMs;
         var stabilized = GifPaletteStabilizer.Stabilize(loop);
-        var start = new ProcessStartInfo
-        {
-            FileName = "ffmpeg",
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        foreach (var argument in new[]
-        {
-            "-hide_banner", "-loglevel", "error",
-            "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "64x64",
-            "-framerate", fps.ToString(System.Globalization.CultureInfo.InvariantCulture), "-i", "pipe:0",
-            "-filter_complex", "[0:v]split[a][b];[a]palettegen=stats_mode=full:reserve_transparent=0[p];[b][p]paletteuse=dither=none",
-            // Crop each frame to the rectangle that changed (no transparency): held pauses cost bytes, not
-            // full 64x64 frames. Full frames made a 612-frame state 2.3 MB and the Pixoo stopped animating it.
-            "-gifflags", "+offsetting", "-loop", "0", "-f", "gif", "pipe:1",
-        }) start.ArgumentList.Add(argument);
-        using var process = new Process { StartInfo = start };
-        try
-        {
-            if (!process.Start()) throw new InvalidOperationException("ffmpeg did not start.");
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            throw new InvalidOperationException("Pixoo GIF encoding requires ffmpeg on PATH.", ex);
-        }
-
-        try
-        {
-            var errorTask = process.StandardError.ReadToEndAsync(ct);
-            var writeTask = Task.Run(async () =>
-            {
-                foreach (var frame in stabilized.Frames)
-                    await process.StandardInput.BaseStream.WriteAsync(frame, ct);
-                await process.StandardInput.BaseStream.FlushAsync(ct);
-                process.StandardInput.Close();
-            }, ct);
-            await using var output = new MemoryStream();
-            await process.StandardOutput.BaseStream.CopyToAsync(output, ct);
-            await writeTask;
-            await process.WaitForExitAsync(ct);
-            var error = await errorTask;
-            if (process.ExitCode != 0)
-                throw new InvalidDataException("ffmpeg could not encode the Pixoo GIF: " + Compact(error));
-            return output.ToArray();
-        }
-        finally
-        {
-            if (!process.HasExited)
-            {
-                try { process.Kill(entireProcessTree: true); }
-                catch (InvalidOperationException) { }
-            }
-        }
+        ct.ThrowIfCancellationRequested();
+        // Written in-process rather than by ffmpeg: the Pixoo mis-renders cropped mid-canvas frames,
+        // so changed frames must be full 64x64 images (see PixooGifWriter).
+        return Task.FromResult(PixooGifWriter.Write(stabilized.Palette, stabilized.Indices, frameDurationMs));
     }
 
     private static string Compact(string value)
