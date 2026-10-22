@@ -73,7 +73,9 @@ public sealed class FfmpegGifEncoder : IGifEncoder
             "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "64x64",
             "-framerate", fps.ToString(System.Globalization.CultureInfo.InvariantCulture), "-i", "pipe:0",
             "-filter_complex", "[0:v]split[a][b];[a]palettegen=stats_mode=full[p];[b][p]paletteuse=dither=none",
-            "-gifflags", "0", "-loop", "0", "-f", "gif", "pipe:1",
+            // Crop each frame to the rectangle that changed (no transparency): held pauses cost bytes, not
+            // full 64x64 frames. Full frames made a 612-frame state 2.3 MB and the Pixoo stopped animating it.
+            "-gifflags", "+offsetting", "-loop", "0", "-f", "gif", "pipe:1",
         }) start.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = start };
         try

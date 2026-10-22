@@ -24,6 +24,27 @@ public sealed class GifPlaybackTests
     }
 
     [Fact]
+    public async Task Held_pauses_stay_small_because_unchanged_frames_are_not_stored_in_full()
+    {
+        // A realistic state loop: a long held still with a short burst of motion. Full-frame encoding
+        // made such loops megabytes large and the Pixoo stopped animating them.
+        var still = Enumerable.Range(0, RgbFrame.ByteCount).Select(i => (byte)(i * 7 % 251)).ToArray();
+        var frames = Enumerable.Range(0, 300).Select(_ => new RgbFrame(still.ToArray(), 100)).ToList();
+        for (var i = 0; i < 20; i++)
+        {
+            var moving = still.ToArray();
+            for (var p = 0; p < 300; p++) moving[(2000 + p + i * 37) % moving.Length] ^= 0x55;
+            frames.Add(new RgbFrame(moving, 100));
+        }
+
+        var gif = await new FfmpegGifEncoder().EncodeAsync(new FrameLoop(frames), 100);
+        var parsed = ParseGif(gif);
+
+        Assert.Equal(320, parsed.FrameCount);
+        Assert.True(gif.Length < 120_000, $"GIF was {gif.Length} bytes");
+    }
+
+    [Fact]
     public async Task Gif_host_returns_404_without_exact_process_token_and_records_fetch()
     {
         const string token = "00112233445566778899aabbccddeeff";
