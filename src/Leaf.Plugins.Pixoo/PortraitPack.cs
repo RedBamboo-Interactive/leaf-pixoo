@@ -33,8 +33,7 @@ public sealed record PortraitClipProvenance(
     string Prompt,
     string Negative,
     string? Note,
-    double IdenticalFractionMinimum,
-    double IdenticalFractionMedian,
+    double FrozenBackgroundFraction,
     DateTimeOffset GeneratedAt);
 
 public sealed record PortraitClip(FrameLoop Loop, PortraitClipProvenance Provenance);
@@ -80,7 +79,7 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-gif-v6-lightx2v-similarity-stabilized";
+    public const string PipelineVersion = "portrait-gif-v7-lightx2v-soft-subject";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {

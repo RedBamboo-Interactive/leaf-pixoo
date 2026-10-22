@@ -24,9 +24,9 @@ public sealed record PortraitClipSettings
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
     public int MaximumAlignmentShift { get; init; } = 12;
-    public double StaticPixelThreshold { get; init; } = 14;
-    public double MotionPixelThreshold { get; init; } = 5;
-    public int MinimumMotionComponentPixels { get; init; } = 3;
+    public double SubjectMotionThreshold { get; init; } = 14;
+    public int SubjectDilationPixels { get; init; } = 6;
+    public int SubjectFeatherPixels { get; init; } = 4;
 }
 
 public sealed record DecodedVideoFrame(byte[] Pixels, int Width, int Height);
@@ -171,7 +171,7 @@ public static class PortraitClipProcessor
         }
         var corrected = PortraitColorCorrector.TransferColour(reduced, referenceStill);
         return PortraitPixelStabilizer.Stabilize(corrected, referenceStill, frameDurationMs, alignments,
-            settings.StaticPixelThreshold, settings.MotionPixelThreshold, settings.MinimumMotionComponentPixels);
+            settings.SubjectMotionThreshold, settings.SubjectDilationPixels, settings.SubjectFeatherPixels);
     }
 
     public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 100)

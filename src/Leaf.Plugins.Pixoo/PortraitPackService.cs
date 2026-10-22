@@ -18,8 +18,7 @@ public sealed record PortraitClipStatus(
     int Attempts,
     string? JobId,
     string? Error,
-    double? IdenticalFractionMinimum,
-    double? IdenticalFractionMedian,
+    double? FrozenBackgroundFraction,
     DateTimeOffset UpdatedAt);
 
 public sealed record PortraitPackStatus(
@@ -171,7 +170,7 @@ public sealed class PortraitPackService(
                 {
                     var existing = pack.Clips[spec.Key].Provenance;
                     SetClip(agentId, spec, "ready", 0, existing.JobId, existing.Note,
-                        existing.IdenticalFractionMinimum, existing.IdenticalFractionMedian);
+                        existing.FrozenBackgroundFraction);
                     return true;
                 }
                 var seed = SeedFor(source.Hash, spec.Key, attempt);
@@ -204,7 +203,7 @@ public sealed class PortraitPackService(
                     pack = pack.WithClip(clip);
                     entityId = await StoreEntityAsync(source, prepared, pack, entityId, token);
                     SetClip(agentId, spec, "ready", attempt, generated.JobId, generated.Note,
-                        processed.IdenticalFractionMinimum, processed.IdenticalFractionMedian);
+                        processed.FrozenBackgroundFraction);
                     await ActivateAsync(agentId, pack);
                     return true;
                 }
@@ -394,8 +393,8 @@ public sealed class PortraitPackService(
         var reduced = await assets.UploadIdempotentAsync(loopStream, $"{stem}:loop",
             $"pixoo-{spec.Key}-64x64.json", "application/json", ct);
         return new(processed.Loop, new(spec.Key, spec.State, generated.Workflow, seed, generated.JobId, video.AssetId, reduced.AssetId,
-            prompt.Prompt, prompt.Negative, generated.Note, processed.IdenticalFractionMinimum,
-            processed.IdenticalFractionMedian, DateTimeOffset.UtcNow));
+            prompt.Prompt, prompt.Negative, generated.Note, processed.FrozenBackgroundFraction,
+            DateTimeOffset.UtcNow));
     }
 
     private async Task<Guid> StoreEntityAsync(SourcePortrait source, PreparedPortrait prepared, PortraitPack pack,
@@ -435,8 +434,7 @@ public sealed class PortraitPackService(
                 ["prompt"] = provenance.Prompt,
                 ["negative"] = provenance.Negative,
                 ["note"] = provenance.Note,
-                ["identical_fraction_minimum"] = provenance.IdenticalFractionMinimum,
-                ["identical_fraction_median"] = provenance.IdenticalFractionMedian,
+                ["frozen_background_fraction"] = provenance.FrozenBackgroundFraction,
                 ["generated_at"] = provenance.GeneratedAt,
             };
         }
@@ -493,8 +491,7 @@ public sealed class PortraitPackService(
                             Text(value, "prompt") ?? string.Empty,
                             Text(value, "negative") ?? string.Empty,
                             Text(value, "note"),
-                            value["identical_fraction_minimum"]?.GetValue<double>() ?? 0,
-                            value["identical_fraction_median"]?.GetValue<double>() ?? 0,
+                            value["frozen_background_fraction"]?.GetValue<double>() ?? 0,
                             value["generated_at"]?.GetValue<DateTimeOffset>() ?? entity.CreatedAt));
                     }
                 }
@@ -540,11 +537,11 @@ public sealed class PortraitPackService(
         => statuses[agentId] = new(agentId, state, sourceAssetId, sourceHash, error, DateTimeOffset.UtcNow, []);
 
     private void SetClip(Guid agentId, PortraitClipSpec spec, string phase, int attempts, string? jobId, string? error,
-        double? identicalFractionMinimum = null, double? identicalFractionMedian = null)
+        double? frozenBackgroundFraction = null)
     {
         var values = clipStatuses.GetOrAdd(agentId, _ => new());
         values[spec.Key] = new(spec.Key, spec.State, spec.Variant, phase, attempts, jobId, error,
-            identicalFractionMinimum, identicalFractionMedian, DateTimeOffset.UtcNow);
+            frozenBackgroundFraction, DateTimeOffset.UtcNow);
     }
 
     private IReadOnlyList<PortraitClipStatus> ClipSnapshot(Guid agentId)
@@ -555,8 +552,7 @@ public sealed class PortraitPackService(
                 current.GetValueOrDefault(agentId)?.Clips.ContainsKey(spec.Key) == true ? "ready" : "pending",
                 0, current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.JobId,
                 current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.Note,
-                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.IdenticalFractionMinimum,
-                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.IdenticalFractionMedian,
+                current.GetValueOrDefault(agentId)?.Clips.GetValueOrDefault(spec.Key)?.Provenance.FrozenBackgroundFraction,
                 DateTimeOffset.UtcNow)).ToArray();
     }
 

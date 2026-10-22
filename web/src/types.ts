@@ -7,5 +7,5 @@ export interface Receipt {pushedAt:string;state:FaceState;gesture?:FaceGesture;c
 export interface PlaybackStatus {playingGif?:string;lastFetchedAt?:string;lastFetchedFrom?:string;deliveryError?:string}
 export interface DisplayState {state:FaceState;gesture?:FaceGesture;loopKey?:string;frameCount:number;frameDurationMs:number;playback:PlaybackStatus}
 export interface Snapshot {device:Device;state:FaceState;gesture?:FaceGesture;frames:Frame[];history:Receipt[];playback?:PlaybackStatus}
-export interface PortraitClipStatus {key?:string;state:FaceState;variant?:string;phase:string;attempts:number;jobId?:string;error?:string;identicalFractionMinimum?:number;identicalFractionMedian?:number;updatedAt:string}
+export interface PortraitClipStatus {key?:string;state:FaceState;variant?:string;phase:string;attempts:number;jobId?:string;error?:string;frozenBackgroundFraction?:number;updatedAt:string}
 export interface PortraitStatus {agentId:string;state:string;sourceAssetId?:string;sourceHash?:string;error?:string;updatedAt:string;clips:PortraitClipStatus[]}

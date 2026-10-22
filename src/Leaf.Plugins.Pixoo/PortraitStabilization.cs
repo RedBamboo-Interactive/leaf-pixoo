@@ -10,9 +10,13 @@ public readonly record struct FrameAlignment(
 
 public sealed record PortraitClipProcessingResult(
     FrameLoop Loop,
-    double IdenticalFractionMinimum,
-    double IdenticalFractionMedian,
+    double FrozenBackgroundFraction,
     IReadOnlyList<FrameAlignment> Alignments);
+
+internal sealed record PortraitSubjectMatte(
+    IReadOnlyList<double> Alpha,
+    double FrozenBackgroundFraction,
+    bool UsedFallback);
 
 /// <summary>
 /// Estimates the global similarity transform of generated content relative to the source still.
@@ -195,58 +199,41 @@ public static class PortraitPixelStabilizer
         byte[] still,
         int durationMs,
         IReadOnlyList<FrameAlignment> alignments,
-        double staticThreshold = 8,
-        double motionThreshold = 5,
-        int minimumComponentPixels = 3)
+        double subjectMotionThreshold = 14,
+        int subjectDilationPixels = 6,
+        int featherPixels = 4)
     {
         if (frames.Count == 0) throw new ArgumentException("At least one frame is required.", nameof(frames));
         if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
             throw new ArgumentException("Pixel stabilization requires 64x64 RGB frames.");
         const int side = 64;
-        const int count = side * side;
-        var distances = frames.Select(frame => Distances(frame, still)).ToArray();
-        var subject = BuildSubjectRegion(distances, staticThreshold, side);
-
-        var raw = distances.Select(values => values.Select((distance, pixel) => subject[pixel] && distance >= motionThreshold).ToArray()).ToArray();
+        var matte = BuildSubjectMatte(frames, still, subjectMotionThreshold, subjectDilationPixels, featherPixels);
         var stabilized = new List<byte[]>(frames.Count);
-        for (var frameIndex = 0; frameIndex < frames.Count; frameIndex++)
+        foreach (var frame in frames)
         {
-            var temporal = new bool[count];
-            for (var pixel = 0; pixel < count; pixel++)
-            {
-                if (!raw[frameIndex][pixel]) continue;
-                var x = pixel % side;
-                var y = pixel / side;
-                temporal[pixel] = HasNeighbour(raw, frameIndex - 1, x, y, side)
-                    || HasNeighbour(raw, frameIndex + 1, x, y, side);
-            }
-            RemoveSmallComponents(temporal, side, minimumComponentPixels);
-            var feather = Dilate(temporal, subject, side);
             var output = still.ToArray();
-            for (var pixel = 0; pixel < count; pixel++)
+            for (var pixel = 0; pixel < side * side; pixel++)
             {
-                if (!temporal[pixel] && !feather[pixel]) continue;
+                var alpha = matte.Alpha[pixel];
+                if (alpha <= 0) continue;
                 var offset = pixel * 3;
-                if (temporal[pixel])
+                if (alpha >= 1)
                 {
-                    frames[frameIndex].AsSpan(offset, 3).CopyTo(output.AsSpan(offset, 3));
+                    frame.AsSpan(offset, 3).CopyTo(output.AsSpan(offset, 3));
                 }
                 else
                 {
                     for (var channel = 0; channel < 3; channel++)
-                        output[offset + channel] = (byte)Math.Round((frames[frameIndex][offset + channel] + still[offset + channel]) / 2d);
+                        output[offset + channel] = (byte)Math.Clamp(Math.Round(
+                            frame[offset + channel] * alpha + still[offset + channel] * (1 - alpha)), 0, 255);
                 }
             }
             stabilized.Add(output);
         }
 
         var closed = PortraitColorCorrector.CloseSeam(stabilized, still);
-        var fractions = closed.Select(frame => IdenticalFraction(frame, still)).OrderBy(value => value).ToArray();
-        var median = fractions.Length % 2 == 1
-            ? fractions[fractions.Length / 2]
-            : (fractions[fractions.Length / 2 - 1] + fractions[fractions.Length / 2]) / 2;
         var loop = new FrameLoop(closed.Select(frame => new RgbFrame(frame, durationMs)).ToArray()).Validate();
-        return new(loop, fractions[0], median, alignments);
+        return new(loop, matte.FrozenBackgroundFraction, alignments);
     }
 
     internal static double IdenticalFraction(byte[] frame, byte[] still)
@@ -257,78 +244,191 @@ public static class PortraitPixelStabilizer
         return identical / 4096d;
     }
 
-    private static double[] Distances(byte[] frame, byte[] still)
+    internal static PortraitSubjectMatte BuildSubjectMatte(IReadOnlyList<byte[]> frames, byte[] still,
+        double threshold = 14, int dilationPixels = 6, int featherPixels = 4)
     {
-        var result = new double[4096];
-        for (var pixel = 0; pixel < result.Length; pixel++)
+        const int side = 64;
+        if (frames.Count == 0 || frames.Any(frame => frame.Length != still.Length) || still.Length != RgbFrame.ByteCount)
+            throw new ArgumentException("A subject matte requires 64x64 RGB frames and a matching still.");
+        if (threshold <= 0) throw new ArgumentOutOfRangeException(nameof(threshold));
+        if (dilationPixels < 0) throw new ArgumentOutOfRangeException(nameof(dilationPixels));
+        if (featherPixels < 1) throw new ArgumentOutOfRangeException(nameof(featherPixels));
+
+        var maximum = new double[side * side];
+        foreach (var frame in frames)
+        for (var pixel = 0; pixel < maximum.Length; pixel++)
         {
             var offset = pixel * 3;
-            result[pixel] = (Math.Abs(frame[offset] - still[offset])
+            var distance = (Math.Abs(frame[offset] - still[offset])
                 + Math.Abs(frame[offset + 1] - still[offset + 1])
                 + Math.Abs(frame[offset + 2] - still[offset + 2])) / 3d;
+            maximum[pixel] = Math.Max(maximum[pixel], distance);
+        }
+
+        var candidates = maximum.Select(value => value >= threshold).ToArray();
+        var portraitPrior = new bool[side * side];
+        AddEllipse(portraitPrior, side, side / 2, 24, 23, 29);
+        AddEllipse(portraitPrior, side, side / 2, 57, 32, 22);
+        for (var pixel = 0; pixel < candidates.Length; pixel++) candidates[pixel] &= portraitPrior[pixel];
+        candidates = Erode(Dilate(candidates, side, 3), side, 3);
+        FillHoles(candidates, side);
+        var components = Components(candidates, side, 4).OrderByDescending(component => component.Count).ToArray();
+        var selected = new bool[candidates.Length];
+        if (components.Length > 0)
+        {
+            foreach (var pixel in components[0]) selected[pixel] = true;
+            var primaryBounds = Bounds(components[0], side);
+            foreach (var component in components.Skip(1))
+            {
+                var componentBounds = Bounds(component, side);
+                if (BoxDistance(primaryBounds, componentBounds) > 8) continue;
+                foreach (var pixel in component) selected[pixel] = true;
+            }
+        }
+
+        var points = Enumerable.Range(0, selected.Length).Where(index => selected[index]).ToArray();
+        var bounds = points.Length == 0 ? new ImageRect(0, 0, 0, 0) : Bounds(points, side);
+        var fallback = points.Length < 80 || bounds.Width < 16 || bounds.Height < 16
+            || points.Length > side * side * .25 || bounds.Width > 48 || bounds.Height > 56;
+        var centreX = fallback ? side / 2 : bounds.X + bounds.Width / 2;
+        centreX = Math.Clamp(centreX, 24, 40);
+        var faceCentreY = fallback ? 23 : Math.Clamp(bounds.Y + bounds.Height / 2, 18, 30);
+
+        bool[] subject;
+        if (fallback)
+        {
+            subject = new bool[side * side];
+        }
+        else
+        {
+            subject = Erode(Dilate(selected, side, 4), side, 4);
+            FillHoles(subject, side);
+            subject = Dilate(subject, side, dilationPixels);
+        }
+
+        // The motion evidence locates the subject, but a portrait-safe silhouette guarantees that
+        // tiny eye or mouth motion never becomes a moving island in an otherwise frozen face.
+        AddEllipse(subject, side, centreX, faceCentreY, 19, 25);
+        AddEllipse(subject, side, centreX, 57, 29, 19);
+        FillHoles(subject, side);
+
+        var alpha = new double[subject.Length];
+        for (var pixel = 0; pixel < subject.Length; pixel++)
+        {
+            if (subject[pixel]) { alpha[pixel] = 1; continue; }
+            var x = pixel % side;
+            var y = pixel / side;
+            var distance = DistanceTo(subject, side, x, y, featherPixels);
+            if (distance > featherPixels) continue;
+            var t = distance / (featherPixels + 1d);
+            alpha[pixel] = 1 - t * t * (3 - 2 * t);
+        }
+        var frozen = alpha.Count(value => value <= 0) / (double)alpha.Length;
+        return new(alpha, frozen, fallback);
+    }
+
+    private static void AddEllipse(bool[] mask, int side, int centreX, int centreY, int radiusX, int radiusY)
+    {
+        for (var y = 0; y < side; y++)
+        for (var x = 0; x < side; x++)
+        {
+            var dx = (x - centreX) / (double)radiusX;
+            var dy = (y - centreY) / (double)radiusY;
+            if (dx * dx + dy * dy <= 1) mask[y * side + x] = true;
+        }
+    }
+
+    private static int DistanceTo(bool[] mask, int side, int x, int y, int maximum)
+    {
+        var best = maximum + 1d;
+        for (var dy = -maximum; dy <= maximum; dy++)
+        for (var dx = -maximum; dx <= maximum; dx++)
+        {
+            var nx = x + dx;
+            var ny = y + dy;
+            if (nx < 0 || nx >= side || ny < 0 || ny >= side || !mask[ny * side + nx]) continue;
+            best = Math.Min(best, Math.Sqrt(dx * dx + dy * dy));
+        }
+        return (int)Math.Ceiling(best);
+    }
+
+    private static bool[] Dilate(bool[] mask, int side, int radius)
+    {
+        if (radius == 0) return mask.ToArray();
+        var result = new bool[mask.Length];
+        for (var y = 0; y < side; y++)
+        for (var x = 0; x < side; x++)
+        for (var dy = -radius; dy <= radius && !result[y * side + x]; dy++)
+        for (var dx = -radius; dx <= radius; dx++)
+        {
+            var nx = x + dx;
+            var ny = y + dy;
+            if (dx * dx + dy * dy <= radius * radius && nx >= 0 && nx < side && ny >= 0 && ny < side
+                && mask[ny * side + nx]) { result[y * side + x] = true; break; }
         }
         return result;
     }
 
-    internal static bool[] BuildSubjectRegion(IReadOnlyList<double[]> distances, double threshold, int side)
-    {
-        var candidates = new bool[side * side];
-        for (var pixel = 0; pixel < candidates.Length; pixel++)
-        {
-            var activeFrames = 0;
-            double maximum = 0;
-            foreach (var frame in distances)
-            {
-                maximum = Math.Max(maximum, frame[pixel]);
-                if (frame[pixel] >= threshold) activeFrames++;
-            }
-            candidates[pixel] = maximum >= threshold * 1.75 || activeFrames >= 2;
-        }
-
-        var components = Components(candidates, side, 3).OrderByDescending(component => component.Count).ToArray();
-        if (components.Length == 0) return candidates;
-        var selected = new bool[candidates.Length];
-        foreach (var pixel in components[0]) selected[pixel] = true;
-        return Dilate(Dilate(selected, Enumerable.Repeat(true, selected.Length).ToArray(), side),
-            Enumerable.Repeat(true, selected.Length).ToArray(), side);
-    }
-
-    private static bool HasNeighbour(IReadOnlyList<bool[]> masks, int frame, int x, int y, int side)
-    {
-        if (frame < 0 || frame >= masks.Count) return false;
-        for (var dy = -1; dy <= 1; dy++)
-        for (var dx = -1; dx <= 1; dx++)
-        {
-            var nx = x + dx;
-            var ny = y + dy;
-            if (nx >= 0 && nx < side && ny >= 0 && ny < side && masks[frame][ny * side + nx]) return true;
-        }
-        return false;
-    }
-
-    private static bool[] Dilate(bool[] mask, bool[] dynamic, int side)
+    private static bool[] Erode(bool[] mask, int side, int radius)
     {
         var result = new bool[mask.Length];
         for (var y = 0; y < side; y++)
         for (var x = 0; x < side; x++)
         {
-            var pixel = y * side + x;
-            if (mask[pixel] || !dynamic[pixel]) continue;
-            for (var dy = -1; dy <= 1 && !result[pixel]; dy++)
-            for (var dx = -1; dx <= 1; dx++)
+            var keep = true;
+            for (var dy = -radius; dy <= radius && keep; dy++)
+            for (var dx = -radius; dx <= radius; dx++)
             {
+                if (dx * dx + dy * dy > radius * radius) continue;
                 var nx = x + dx;
                 var ny = y + dy;
-                if (nx >= 0 && nx < side && ny >= 0 && ny < side && mask[ny * side + nx]) { result[pixel] = true; break; }
+                if (nx < 0 || nx >= side || ny < 0 || ny >= side || !mask[ny * side + nx]) { keep = false; break; }
             }
+            result[y * side + x] = keep;
         }
         return result;
     }
 
-    private static void RemoveSmallComponents(bool[] mask, int side, int minimum)
+    private static void FillHoles(bool[] mask, int side)
     {
-        foreach (var component in Components(mask, side, 1).Where(component => component.Count < minimum))
-            foreach (var pixel in component) mask[pixel] = false;
+        var outside = new bool[mask.Length];
+        var queue = new Queue<int>();
+        void Seed(int pixel) { if (!mask[pixel] && !outside[pixel]) { outside[pixel] = true; queue.Enqueue(pixel); } }
+        for (var value = 0; value < side; value++) { Seed(value); Seed((side - 1) * side + value); Seed(value * side); Seed(value * side + side - 1); }
+        while (queue.Count > 0)
+        {
+            var pixel = queue.Dequeue();
+            var x = pixel % side;
+            var y = pixel / side;
+            foreach (var (dx, dy) in new[] { (-1, 0), (1, 0), (0, -1), (0, 1) })
+            {
+                var nx = x + dx;
+                var ny = y + dy;
+                if (nx < 0 || nx >= side || ny < 0 || ny >= side) continue;
+                var next = ny * side + nx;
+                if (!mask[next] && !outside[next]) { outside[next] = true; queue.Enqueue(next); }
+            }
+        }
+        for (var pixel = 0; pixel < mask.Length; pixel++) if (!mask[pixel] && !outside[pixel]) mask[pixel] = true;
+    }
+
+    private static ImageRect Bounds(IReadOnlyList<int> pixels, int side)
+    {
+        var minX = side; var minY = side; var maxX = 0; var maxY = 0;
+        foreach (var pixel in pixels)
+        {
+            var x = pixel % side; var y = pixel / side;
+            minX = Math.Min(minX, x); minY = Math.Min(minY, y);
+            maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y);
+        }
+        return new(minX, minY, maxX - minX + 1, maxY - minY + 1);
+    }
+
+    private static int BoxDistance(ImageRect left, ImageRect right)
+    {
+        var dx = Math.Max(0, Math.Max(left.X - right.Right, right.X - left.Right));
+        var dy = Math.Max(0, Math.Max(left.Y - right.Bottom, right.Y - left.Bottom));
+        return Math.Max(dx, dy);
     }
 
     private static IReadOnlyList<List<int>> Components(bool[] mask, int side, int minimum)

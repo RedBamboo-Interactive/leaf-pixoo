@@ -122,7 +122,7 @@ public sealed class GifPlaybackTests
     }
 
     [Fact]
-    public void Stabilizer_recovers_global_drift_locks_static_pixels_and_preserves_coherent_motion()
+    public void Stabilizer_recovers_global_drift_freezes_the_background_and_keeps_the_subject_whole()
     {
         const int side = 384;
         var stillSource = TexturedSource(side);
@@ -142,16 +142,48 @@ public sealed class GifPlaybackTests
         var settings = new PortraitClipSettings { SampleStride = 1, MaximumLoopFrames = 8 };
         var processed = PortraitClipProcessor.ProcessMotionLoop(decoded, settings, still, stillSource);
 
-        Assert.True(processed.IdenticalFractionMinimum >= .90,
-            $"Only {processed.IdenticalFractionMinimum:P1} of the least-stable frame was locked to the still.");
-        Assert.All(processed.Loop.Frames, frame =>
-            Assert.True(PortraitPixelStabilizer.IdenticalFraction(frame.Pixels, still) >= .90));
+        Assert.InRange(processed.FrozenBackgroundFraction, .15, .70);
 
         // The coherent 36x30 source blob maps to this small central band and must remain animated.
         var blobChanged = processed.Loop.Frames.Skip(1).Take(processed.Loop.Frames.Count - 2)
             .Any(frame => RegionDifference(frame.Pixels, still, 23, 28, 13, 9) > 80);
         Assert.True(blobChanged, "The coherent local motion was removed.");
-        Assert.All(processed.Loop.Frames, frame => AssertNoIsolatedChangedPixel(frame.Pixels, still));
+    }
+
+    [Fact]
+    public void Tiny_feature_motion_uses_a_whole_soft_head_and_shoulders_matte()
+    {
+        var still = Solid(80);
+        var frames = Enumerable.Range(0, 11).Select(index =>
+        {
+            var frame = still.ToArray();
+            for (var y = 3; y < 60; y++)
+            for (var x = 14; x < 51; x++)
+            for (var channel = 0; channel < 3; channel++)
+                frame[(y * 64 + x) * 3 + channel] = (byte)(82 + index % 3); // sub-threshold subject motion
+            Paint(frame, 28 + index % 2, 20, 7, 4, 170);       // the only threshold-crossing feature
+            return frame;
+        }).ToArray();
+
+        var matte = PortraitPixelStabilizer.BuildSubjectMatte(frames, still);
+        Assert.True(matte.UsedFallback);
+        Assert.Equal(1, matte.Alpha[24 * 64 + 32]);
+        Assert.Equal(1, matte.Alpha[52 * 64 + 32]);
+        Assert.Equal(0, matte.Alpha[0]);
+        for (var y = 0; y < 64; y++)
+        for (var x = 0; x < 64; x++)
+        {
+            var value = matte.Alpha[y * 64 + x];
+            if (x + 1 < 64) Assert.True(Math.Abs(value - matte.Alpha[y * 64 + x + 1]) <= .31);
+            if (y + 1 < 64) Assert.True(Math.Abs(value - matte.Alpha[(y + 1) * 64 + x]) <= .31);
+        }
+
+        var stabilized = PortraitPixelStabilizer.Stabilize(frames, still, 100,
+            Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray());
+        var middle = stabilized.Loop.Frames[5].Pixels;
+        var facePixel = (32 * 64 + 32) * 3;
+        Assert.Equal(frames[5].AsSpan(facePixel, 3).ToArray(), middle.AsSpan(facePixel, 3).ToArray());
+        Assert.Equal(still.AsSpan(0, 3).ToArray(), middle.AsSpan(0, 3).ToArray());
     }
 
     [Fact]
@@ -170,22 +202,22 @@ public sealed class GifPlaybackTests
     }
 
     [Fact]
-    public void Subject_region_freezes_disconnected_background_motion()
+    public void Subject_region_freezes_disconnected_far_background_motion()
     {
         var still = Solid(60);
         var frames = Enumerable.Range(0, 8).Select(index =>
         {
             var frame = still.ToArray();
             Paint(frame, 20 + index % 2, 12, 12, 14, 210); // coherent subject motion
-            Paint(frame, 52, 8 + index % 2, 3, 12, 180);   // disconnected shelf-edge wobble
+            Paint(frame, 60, 5 + index % 2, 3, 12, 180);   // disconnected shelf-edge wobble
             return frame;
         }).ToArray();
 
         var stabilized = PortraitPixelStabilizer.Stabilize(frames, still, 100,
-            Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray(), 14, 5, 3);
+            Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray());
 
         Assert.Contains(stabilized.Loop.Frames, frame => RegionDifference(frame.Pixels, still, 18, 10, 18, 18) > 0);
-        Assert.All(stabilized.Loop.Frames, frame => Assert.Equal(0, RegionDifference(frame.Pixels, still, 49, 5, 10, 20)));
+        Assert.All(stabilized.Loop.Frames, frame => Assert.Equal(0, RegionDifference(frame.Pixels, still, 60, 3, 4, 20)));
     }
 
     [Theory]
@@ -332,30 +364,6 @@ public sealed class GifPlaybackTests
             pixels[offset] = value;
             pixels[offset + 1] = (byte)(value / 2);
             pixels[offset + 2] = (byte)(255 - value / 2);
-        }
-    }
-
-    private static void AssertNoIsolatedChangedPixel(byte[] frame, byte[] still)
-    {
-        for (var y = 0; y < 64; y++)
-        for (var x = 0; x < 64; x++)
-        {
-            var pixel = y * 64 + x;
-            var offset = pixel * 3;
-            var changed = frame[offset] != still[offset] || frame[offset + 1] != still[offset + 1] || frame[offset + 2] != still[offset + 2];
-            if (!changed) continue;
-            var neighbours = 0;
-            for (var dy = -1; dy <= 1; dy++)
-            for (var dx = -1; dx <= 1; dx++)
-            {
-                if (dx == 0 && dy == 0) continue;
-                var nx = x + dx; var ny = y + dy;
-                if (nx < 0 || nx >= 64 || ny < 0 || ny >= 64) continue;
-                var neighbour = (ny * 64 + nx) * 3;
-                if (frame[neighbour] != still[neighbour] || frame[neighbour + 1] != still[neighbour + 1]
-                    || frame[neighbour + 2] != still[neighbour + 2]) neighbours++;
-            }
-            Assert.True(neighbours > 0, $"Isolated flicker remained at ({x},{y}).");
         }
     }
 

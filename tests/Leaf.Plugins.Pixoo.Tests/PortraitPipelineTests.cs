@@ -198,7 +198,7 @@ public sealed class PortraitPipelineTests
     private static PortraitClip Clip(FaceState state, byte[] pixels)
         => new(new FrameLoop([new RgbFrame(pixels, 133)]),
             new(PortraitClipPlan.PrimaryKey(state), state, PortraitPackService.Workflow, 1, "job", "video", "loop", "prompt", "negative", null,
-                0, 0,
+                0,
                 DateTimeOffset.UnixEpoch));
 
     private static byte[] SyntheticPortrait()
