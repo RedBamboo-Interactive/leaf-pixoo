@@ -7,7 +7,8 @@ const params=new URLSearchParams(location.search)
 const harness=location.port==='4173' || params.has('harness')
 const ids={device:'11111111-1111-1111-1111-111111111111',second:'44444444-4444-4444-4444-444444444444',agent:'22222222-2222-2222-2222-222222222222',secondAgent:'33333333-3333-3333-3333-333333333333'}
 const agents:Agent[]=[{id:ids.agent,name:'Demo Agent',color:'#9a7cff'},{id:ids.secondAgent,name:'Second Agent',color:'#78e6c4'}]
-const primary:Device={id:ids.device,name:'Living room',kind:'emulator',brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:false}
+const hardwarePreview=params.get('hardware')==='1'
+const primary:Device={id:ids.device,name:'Living room',kind:hardwarePreview?'pixoo64':'emulator',host:hardwarePreview?'192.0.2.60':undefined,brightness:82,agentId:ids.agent,agentColor:'#9a7cff',minimumPushGapMs:1000,hardwareEnabled:hardwarePreview}
 const secondary:Device={id:ids.second,name:'Studio shelf',kind:'emulator',brightness:68,agentId:ids.secondAgent,agentColor:'#78e6c4',minimumPushGapMs:1000,hardwareEnabled:false}
 const scenario=params.get('scenario')??'one'
 let devices:Device[]=scenario==='empty'?[]:scenario==='two'?[primary,secondary]:[primary]
@@ -96,7 +97,7 @@ export async function simulate(deviceId:string,state:FaceState,gesture?:FaceGest
 }
 
 function makeSnapshot(device:Device):Snapshot{
-  return {device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}],playback:{playingGif:'resting-1'}}
+  return {device,state:'resting',frames:render('resting',device.agentColor,device.brightness),history:[{pushedAt:new Date().toISOString(),state:'resting',cause:'device.created',frameCount:4}],playback:{playingGif:'resting-1',...(device.kind==='pixoo64'?{lastFetchedAt:new Date().toISOString(),lastFetchedFrom:'192.0.2.60',health:{state:'online' as const,lastProbeAt:new Date().toISOString(),consecutiveFailures:0}}:{})}}
 }
 
 async function loadPreview(){

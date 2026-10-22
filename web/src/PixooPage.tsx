@@ -2,7 +2,7 @@ import {useEffect,useState} from 'react'
 import {
   Badge,Button,Card,CardAction,CardContent,CardDescription,CardHeader,CardTitle,
   Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle,EntityCard,Input,Label,
-  ItemList,ItemListRow,MasterDetailLayout,PanelHeader,ScrollArea,Slider,
+  ItemList,ItemListRow,MasterDetailLayout,PanelHeader,ScrollArea,Slider,Switch,
   Table,TableBody,TableCell,TableHead,TableHeader,TableRow,
 } from '@redbamboo/ui'
 import type {LeafPluginExtensionProps} from '@redbamboo/utility'
@@ -310,6 +310,28 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
               <Slider id="pixoo-brightness" aria-label="Brightness" min={0} max={100} value={[device.brightness]} onValueChange={value=>void save({brightness:Array.isArray(value)?value[0]??0:value})}/>
             </div>}
 
+            {device?.kind==='pixoo64'&&<div className="space-y-2 border-t border-border pt-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <Label htmlFor="pixoo-hardware-enabled">Show on device</Label>
+                    {!device.hardwareEnabled?<span className="inline-flex items-center gap-1.5 text-xs text-text-muted" aria-live="polite">
+                      <span className="size-2 rounded-full bg-overlay-20" aria-hidden="true"/>Off
+                    </span>:view?.playback?.health&&<span className="inline-flex items-center gap-1.5 text-xs text-text-muted" aria-live="polite">
+                      <span className={'size-2 rounded-full '+(view.playback.health.state==='offline'?'bg-destructive':'bg-success')} aria-hidden="true"/>
+                      <span className="capitalize">{view.playback.health.state}</span>
+                      {view.playback.health.lastProbeAt&&<span className="tabular-nums">· checked {new Date(view.playback.health.lastProbeAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
+                      {view.playback.health.state==='recovered'&&view.playback.health.lastRecoveryAt&&<span className="tabular-nums">· restored {new Date(view.playback.health.lastRecoveryAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
+                      {view.playback.health.state==='offline'&&view.playback.health.consecutiveFailures>1&&<span>· {view.playback.health.consecutiveFailures} failed probes</span>}
+                    </span>}
+                  </div>
+                  <p className="mt-1 text-xs text-text-muted">Allow Leaf to drive this physical display.</p>
+                </div>
+                <Switch id="pixoo-hardware-enabled" checked={device.hardwareEnabled} disabled={busy}
+                  onCheckedChange={value=>void save({hardwareEnabled:value})}/>
+              </div>
+            </div>}
+
             <div className="space-y-2 border-t border-border pt-4">
               <div className="flex items-center justify-between gap-3">
                 <Label>Device playback</Label>
@@ -318,13 +340,6 @@ export function PixooPage({embedded=false}:{embedded?:boolean}={}){
               {view?.playback?.lastFetchedAt&&<p className="text-xs text-text-muted">
                 Fetched {new Date(view.playback.lastFetchedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
                 {view.playback.lastFetchedFrom?' from '+view.playback.lastFetchedFrom:''}
-              </p>}
-              {view?.playback?.health&&<p className="flex items-center gap-2 text-xs text-text-muted" aria-live="polite">
-                <span className={'size-2 rounded-full '+(view.playback.health.state==='offline'?'bg-destructive':'bg-success')} aria-hidden="true"/>
-                <span className="capitalize">{view.playback.health.state}</span>
-                {view.playback.health.lastProbeAt&&<span className="tabular-nums">checked {new Date(view.playback.health.lastProbeAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
-                {view.playback.health.state==='recovered'&&view.playback.health.lastRecoveryAt&&<span className="tabular-nums">· restored {new Date(view.playback.health.lastRecoveryAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>}
-                {view.playback.health.state==='offline'&&view.playback.health.consecutiveFailures>1&&<span>· {view.playback.health.consecutiveFailures} failed probes</span>}
               </p>}
               {view?.playback?.deliveryError&&<p role="alert" className="rounded-md bg-destructive-a10 px-3 py-2 text-xs text-destructive">{view.playback.deliveryError}</p>}
             </div>

@@ -53,8 +53,25 @@ const { chromiumLaunchOptions, outputDirectory } = require('./visual-output.cjs'
         }
       }
     }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    for (const theme of ['light', 'dark']) {
+      await page.goto(`http://127.0.0.1:4173/?harness=1&surface=nova&scenario=one&hardware=1&theme=${theme}`, { waitUntil: 'networkidle' });
+      const hardware = page.getByRole('switch', { name: 'Show on device' });
+      await hardware.waitFor();
+      if (!await hardware.isChecked()) throw new Error('Hardware preview switch is not enabled');
+      await page.getByText('online', { exact: true }).waitFor();
+      await hardware.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(artifacts, `hardware-${theme}.png`) });
+      screenshots++;
+      await hardware.click();
+      await page.getByText('Off', { exact: true }).waitFor();
+      if (await hardware.isChecked()) throw new Error('Hardware preview switch did not save off');
+      await hardware.click();
+      await page.getByText('online', { exact: true }).waitFor();
+      if (!await hardware.isChecked()) throw new Error('Hardware preview switch did not save on');
+    }
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log(JSON.stringify({ screenshots, scenarios: 3, errors: 0 }));
+    console.log(JSON.stringify({ screenshots, scenarios: 4, errors: 0 }));
   } finally {
     await browser.close();
   }
