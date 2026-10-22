@@ -8,35 +8,27 @@ public static class PortraitColorCorrector
     public static IReadOnlyList<byte[]> Correct(
         IReadOnlyList<byte[]> frames,
         byte[] still,
-        int fadeFrames = 4,
-        double smoothing = .35)
+        int fadeFrames = 4)
     {
         if (frames.Count == 0) throw new ArgumentException("At least one clip frame is required.", nameof(frames));
         if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
             throw new ArgumentException("Colour correction requires 64x64 RGB frames.");
         if (fadeFrames < 1) throw new ArgumentOutOfRangeException(nameof(fadeFrames));
-        var corrected = TransferColour(frames, still, smoothing);
+        var corrected = TransferColour(frames, still);
         return CloseSeam(corrected, still, fadeFrames);
     }
 
     internal static IReadOnlyList<byte[]> TransferColour(
         IReadOnlyList<byte[]> frames,
-        byte[] still,
-        double smoothing = .35)
+        byte[] still)
     {
         if (frames.Count == 0) throw new ArgumentException("At least one clip frame is required.", nameof(frames));
         if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
             throw new ArgumentException("Colour correction requires 64x64 RGB frames.");
-        var target = Statistics(still);
-        LabStatistics? running = null;
-        var corrected = new List<byte[]>(frames.Count);
-        foreach (var frame in frames)
-        {
-            var measured = Statistics(frame);
-            running = running is null ? measured : LabStatistics.Lerp(running.Value, measured, smoothing);
-            corrected.Add(Transfer(frame, running.Value, target));
-        }
-        return corrected;
+        var source = MeanLab(frames);
+        var target = MeanLab([still]);
+        var shift = new Lab(target.L - source.L, target.A - source.A, target.B - source.B);
+        return frames.Select(frame => TransferMean(frame, shift)).ToArray();
     }
 
     internal static IReadOnlyList<byte[]> CloseSeam(IReadOnlyList<byte[]> frames, byte[] still, int fadeFrames = 4)
@@ -60,16 +52,13 @@ public static class PortraitColorCorrector
 
     internal static double Mean(byte[] pixels) => pixels.Average(value => (double)value);
 
-    private static byte[] Transfer(byte[] pixels, LabStatistics source, LabStatistics target)
+    private static byte[] TransferMean(byte[] pixels, Lab shift)
     {
         var result = new byte[pixels.Length];
         for (var index = 0; index < pixels.Length; index += 3)
         {
             var lab = ToLab(pixels[index], pixels[index + 1], pixels[index + 2]);
-            var adjusted = new Lab(
-                target.Mean.L + (lab.L - source.Mean.L) * SafeRatio(target.Std.L, source.Std.L),
-                target.Mean.A + (lab.A - source.Mean.A) * SafeRatio(target.Std.A, source.Std.A),
-                target.Mean.B + (lab.B - source.Mean.B) * SafeRatio(target.Std.B, source.Std.B));
+            var adjusted = new Lab(lab.L + shift.L, lab.A + shift.A, lab.B + shift.B);
             var rgb = ToRgb(adjusted);
             result[index] = rgb.R;
             result[index + 1] = rgb.G;
@@ -77,8 +66,6 @@ public static class PortraitColorCorrector
         }
         return result;
     }
-
-    private static double SafeRatio(double target, double source) => Math.Clamp(target / Math.Max(source, 1.5), .25, 4);
 
     private static byte[] Blend(byte[] frame, byte[] still, double stillWeight)
     {
@@ -88,21 +75,17 @@ public static class PortraitColorCorrector
         return result;
     }
 
-    private static LabStatistics Statistics(byte[] pixels)
+    private static Lab MeanLab(IReadOnlyList<byte[]> frames)
     {
-        double l = 0, a = 0, b = 0, l2 = 0, a2 = 0, b2 = 0;
-        var count = pixels.Length / 3;
+        double l = 0, a = 0, b = 0;
+        var count = frames.Sum(frame => frame.Length / 3);
+        foreach (var pixels in frames)
         for (var index = 0; index < pixels.Length; index += 3)
         {
             var value = ToLab(pixels[index], pixels[index + 1], pixels[index + 2]);
             l += value.L; a += value.A; b += value.B;
-            l2 += value.L * value.L; a2 += value.A * value.A; b2 += value.B * value.B;
         }
-        var mean = new Lab(l / count, a / count, b / count);
-        return new(mean, new(
-            Math.Sqrt(Math.Max(0, l2 / count - mean.L * mean.L)),
-            Math.Sqrt(Math.Max(0, a2 / count - mean.A * mean.A)),
-            Math.Sqrt(Math.Max(0, b2 / count - mean.B * mean.B))));
+        return new(l / count, a / count, b / count);
     }
 
     private static Lab ToLab(byte red, byte green, byte blue)
@@ -148,15 +131,6 @@ public static class PortraitColorCorrector
 
     private readonly record struct Lab(double L, double A, double B);
     private readonly record struct Rgb(byte R, byte G, byte B);
-    private readonly record struct LabStatistics(Lab Mean, Lab Std)
-    {
-        public static LabStatistics Lerp(LabStatistics previous, LabStatistics current, double amount)
-            => new(Lerp(previous.Mean, current.Mean, amount), Lerp(previous.Std, current.Std, amount));
-        private static Lab Lerp(Lab left, Lab right, double amount) => new(
-            left.L + (right.L - left.L) * amount,
-            left.A + (right.A - left.A) * amount,
-            left.B + (right.B - left.B) * amount);
-    }
 }
 
 public sealed record CompositeSettings

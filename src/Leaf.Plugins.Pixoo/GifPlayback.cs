@@ -58,6 +58,7 @@ public sealed class FfmpegGifEncoder : IGifEncoder
         if (frameDurationMs <= 0 || 1000 % frameDurationMs != 0)
             throw new ArgumentOutOfRangeException(nameof(frameDurationMs), "GIF timing must divide one second exactly.");
         var fps = 1000 / frameDurationMs;
+        var stabilized = GifPaletteStabilizer.Stabilize(loop);
         var start = new ProcessStartInfo
         {
             FileName = "ffmpeg",
@@ -72,7 +73,7 @@ public sealed class FfmpegGifEncoder : IGifEncoder
             "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", "64x64",
             "-framerate", fps.ToString(System.Globalization.CultureInfo.InvariantCulture), "-i", "pipe:0",
-            "-filter_complex", "[0:v]split[a][b];[a]palettegen=stats_mode=full[p];[b][p]paletteuse=dither=none",
+            "-filter_complex", "[0:v]split[a][b];[a]palettegen=stats_mode=full:reserve_transparent=0[p];[b][p]paletteuse=dither=none",
             // Crop each frame to the rectangle that changed (no transparency): held pauses cost bytes, not
             // full 64x64 frames. Full frames made a 612-frame state 2.3 MB and the Pixoo stopped animating it.
             "-gifflags", "+offsetting", "-loop", "0", "-f", "gif", "pipe:1",
@@ -92,8 +93,8 @@ public sealed class FfmpegGifEncoder : IGifEncoder
             var errorTask = process.StandardError.ReadToEndAsync(ct);
             var writeTask = Task.Run(async () =>
             {
-                foreach (var frame in loop.Frames)
-                    await process.StandardInput.BaseStream.WriteAsync(frame.Pixels, ct);
+                foreach (var frame in stabilized.Frames)
+                    await process.StandardInput.BaseStream.WriteAsync(frame, ct);
                 await process.StandardInput.BaseStream.FlushAsync(ct);
                 process.StandardInput.Close();
             }, ct);

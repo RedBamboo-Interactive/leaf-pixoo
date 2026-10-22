@@ -71,6 +71,54 @@ public static class PortraitFrameAligner
             : new(0, 0, 1, 0, confidence, false);
     }
 
+    public static IReadOnlyList<FrameAlignment> SmoothTrajectory(IReadOnlyList<FrameAlignment> values,
+        int sourceSize, int window = 5, double deadBandPixels = .3, double constantThresholdPixels = .5)
+    {
+        if (values.Count == 0) return [];
+        if (sourceSize < 1) throw new ArgumentOutOfRangeException(nameof(sourceSize));
+        if (window < 3 || window % 2 == 0) throw new ArgumentOutOfRangeException(nameof(window));
+        var reliable = values.Where(value => value.Reliable).ToArray();
+        if (reliable.Length == 0) return values.Select(_ => new FrameAlignment(0, 0, 1, 0, 0, false)).ToArray();
+
+        var scalePixels = sourceSize / 2d;
+        var stable = Range(reliable.Select(value => value.ShiftX)) <= constantThresholdPixels
+            && Range(reliable.Select(value => value.ShiftY)) <= constantThresholdPixels
+            && Range(reliable.Select(value => value.Scale)) * scalePixels <= constantThresholdPixels;
+        if (stable)
+        {
+            var constant = Average(reliable);
+            return values.Select(_ => constant).ToArray();
+        }
+
+        var radius = window / 2;
+        var smoothed = new FrameAlignment[values.Count];
+        for (var index = 0; index < values.Count; index++)
+        {
+            var neighbours = new List<(FrameAlignment Value, int Weight)>();
+            for (var offset = -radius; offset <= radius; offset++)
+            {
+                var candidate = values[(index + offset + values.Count) % values.Count];
+                if (candidate.Reliable) neighbours.Add((candidate, radius + 1 - Math.Abs(offset)));
+            }
+            smoothed[index] = neighbours.Count == 0 ? new(0, 0, 1, 0, 0, false) : WeightedAverage(neighbours);
+        }
+
+        for (var index = 1; index < smoothed.Length; index++)
+        {
+            var previous = smoothed[index - 1];
+            var current = smoothed[index];
+            var movement = Math.Max(Math.Max(Math.Abs(current.ShiftX - previous.ShiftX),
+                    Math.Abs(current.ShiftY - previous.ShiftY)),
+                Math.Abs(current.Scale - previous.Scale) * scalePixels);
+            if (movement < deadBandPixels) smoothed[index] = previous;
+        }
+        var closure = Math.Max(Math.Max(Math.Abs(smoothed[^1].ShiftX - smoothed[0].ShiftX),
+                Math.Abs(smoothed[^1].ShiftY - smoothed[0].ShiftY)),
+            Math.Abs(smoothed[^1].Scale - smoothed[0].Scale) * scalePixels);
+        if (closure < deadBandPixels) smoothed[^1] = smoothed[0];
+        return smoothed;
+    }
+
     public static byte[] Align(byte[] still, byte[] frame, int width, int height, FrameAlignment alignment)
     {
         Validate(still, frame, width, height);
@@ -106,6 +154,27 @@ public static class PortraitFrameAligner
         var currentDistance = Math.Abs(current.ShiftX) + Math.Abs(current.ShiftY) + Math.Abs(current.Scale - 1) * 100;
         var candidateDistance = Math.Abs(candidate.ShiftX) + Math.Abs(candidate.ShiftY) + Math.Abs(candidate.Scale - 1) * 100;
         return candidateDistance < currentDistance ? candidate : current;
+    }
+
+    private static double Range(IEnumerable<double> values)
+    {
+        var array = values.ToArray();
+        return array.Max() - array.Min();
+    }
+
+    private static FrameAlignment Average(IReadOnlyList<FrameAlignment> values)
+        => new(values.Average(value => value.ShiftX), values.Average(value => value.ShiftY),
+            values.Average(value => value.Scale), values.Average(value => value.RotationDegrees),
+            values.Average(value => value.Confidence), true);
+
+    private static FrameAlignment WeightedAverage(IReadOnlyList<(FrameAlignment Value, int Weight)> values)
+    {
+        var weight = values.Sum(item => item.Weight);
+        return new(values.Sum(item => item.Value.ShiftX * item.Weight) / weight,
+            values.Sum(item => item.Value.ShiftY * item.Weight) / weight,
+            values.Sum(item => item.Value.Scale * item.Weight) / weight,
+            values.Sum(item => item.Value.RotationDegrees * item.Weight) / weight,
+            values.Sum(item => item.Value.Confidence * item.Weight) / weight, true);
     }
 
     private static double Score(double[] reference, double[] frame, int width, int height,
@@ -201,15 +270,18 @@ public static class PortraitPixelStabilizer
         IReadOnlyList<FrameAlignment> alignments,
         double subjectMotionThreshold = 14,
         int subjectDilationPixels = 6,
-        int featherPixels = 4)
+        int featherPixels = 4,
+        double hysteresisThreshold = 10)
     {
         if (frames.Count == 0) throw new ArgumentException("At least one frame is required.", nameof(frames));
         if (still.Length != RgbFrame.ByteCount || frames.Any(frame => frame.Length != still.Length))
             throw new ArgumentException("Pixel stabilization requires 64x64 RGB frames.");
         const int side = 64;
         var matte = BuildSubjectMatte(frames, still, subjectMotionThreshold, subjectDilationPixels, featherPixels);
+        var filtered = ApplyHysteresis(TemporalLowPass(frames, matte.Alpha), still, matte.Alpha,
+            hysteresisThreshold);
         var stabilized = new List<byte[]>(frames.Count);
-        foreach (var frame in frames)
+        foreach (var frame in filtered)
         {
             var output = still.ToArray();
             for (var pixel = 0; pixel < side * side; pixel++)
@@ -234,6 +306,61 @@ public static class PortraitPixelStabilizer
         var closed = PortraitColorCorrector.CloseSeam(stabilized, still);
         var loop = new FrameLoop(closed.Select(frame => new RgbFrame(frame, durationMs)).ToArray()).Validate();
         return new(loop, matte.FrozenBackgroundFraction, alignments);
+    }
+
+    internal static IReadOnlyList<byte[]> TemporalLowPass(IReadOnlyList<byte[]> frames,
+        IReadOnlyList<double> subjectAlpha)
+    {
+        if (frames.Count == 0) throw new ArgumentException("At least one frame is required.", nameof(frames));
+        if (subjectAlpha.Count != 4096 || frames.Any(frame => frame.Length != RgbFrame.ByteCount))
+            throw new ArgumentException("Temporal filtering requires 64x64 RGB frames and a matching matte.");
+        var result = new byte[frames.Count][];
+        for (var frameIndex = 0; frameIndex < frames.Count; frameIndex++)
+        {
+            var previous = frames[(frameIndex - 1 + frames.Count) % frames.Count];
+            var current = frames[frameIndex];
+            var next = frames[(frameIndex + 1) % frames.Count];
+            var output = current.ToArray();
+            for (var pixel = 0; pixel < subjectAlpha.Count; pixel++)
+            {
+                if (subjectAlpha[pixel] <= 0) continue;
+                var offset = pixel * 3;
+                for (var channel = 0; channel < 3; channel++)
+                    output[offset + channel] = (byte)((previous[offset + channel]
+                        + current[offset + channel] * 2 + next[offset + channel] + 2) / 4);
+            }
+            result[frameIndex] = output;
+        }
+        return result;
+    }
+
+    internal static IReadOnlyList<byte[]> ApplyHysteresis(IReadOnlyList<byte[]> frames, byte[] still,
+        IReadOnlyList<double> subjectAlpha, double threshold = 8)
+    {
+        if (frames.Count == 0) throw new ArgumentException("At least one frame is required.", nameof(frames));
+        if (still.Length != RgbFrame.ByteCount || subjectAlpha.Count != 4096
+            || frames.Any(frame => frame.Length != still.Length))
+            throw new ArgumentException("Temporal hysteresis requires 64x64 RGB frames and a matching matte.");
+        if (threshold < 0) throw new ArgumentOutOfRangeException(nameof(threshold));
+        var previous = still.ToArray();
+        var result = new List<byte[]>(frames.Count);
+        foreach (var frame in frames)
+        {
+            var output = frame.ToArray();
+            for (var pixel = 0; pixel < subjectAlpha.Count; pixel++)
+            {
+                if (subjectAlpha[pixel] <= 0) continue;
+                var offset = pixel * 3;
+                var difference = (Math.Abs(frame[offset] - previous[offset])
+                    + Math.Abs(frame[offset + 1] - previous[offset + 1])
+                    + Math.Abs(frame[offset + 2] - previous[offset + 2])) / 3d;
+                if (difference > threshold) continue;
+                previous.AsSpan(offset, 3).CopyTo(output.AsSpan(offset, 3));
+            }
+            result.Add(output);
+            previous = output;
+        }
+        return result;
     }
 
     internal static double IdenticalFraction(byte[] frame, byte[] still)

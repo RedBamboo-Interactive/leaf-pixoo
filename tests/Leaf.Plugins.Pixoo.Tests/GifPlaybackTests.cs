@@ -181,7 +181,7 @@ public sealed class GifPlaybackTests
             for (var y = 3; y < 60; y++)
             for (var x = 14; x < 51; x++)
             for (var channel = 0; channel < 3; channel++)
-                frame[(y * 64 + x) * 3 + channel] = (byte)(82 + index % 3); // sub-threshold subject motion
+                frame[(y * 64 + x) * 3 + channel] = 91; // coherent subject signal below the matte threshold
             Paint(frame, 28 + index % 2, 20, 7, 4, 170);       // the only threshold-crossing feature
             return frame;
         }).ToArray();
@@ -203,7 +203,9 @@ public sealed class GifPlaybackTests
             Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray());
         var middle = stabilized.Loop.Frames[5].Pixels;
         var facePixel = (32 * 64 + 32) * 3;
-        Assert.Equal(frames[5].AsSpan(facePixel, 3).ToArray(), middle.AsSpan(facePixel, 3).ToArray());
+        Assert.NotEqual(still.AsSpan(facePixel, 3).ToArray(), middle.AsSpan(facePixel, 3).ToArray());
+        var neighbour = (32 * 64 + 33) * 3;
+        Assert.Equal(middle.AsSpan(facePixel, 3).ToArray(), middle.AsSpan(neighbour, 3).ToArray());
         Assert.Equal(still.AsSpan(0, 3).ToArray(), middle.AsSpan(0, 3).ToArray());
     }
 
@@ -220,6 +222,72 @@ public sealed class GifPlaybackTests
         Assert.InRange(alignment.Scale, 1.014, 1.022);
         Assert.InRange(alignment.ShiftX, 2.65, 4.15);
         Assert.InRange(alignment.ShiftY, -3.35, -1.85);
+    }
+
+    [Fact]
+    public void Similarity_trajectory_uses_a_constant_transform_inside_the_dead_band_and_smooths_jumps()
+    {
+        var tiny = new[] { 2.0, 2.2, 1.9, 2.1, 2.05 }.Select(value =>
+            new FrameAlignment(value, -.1, 1.0005, 0, 1, true)).ToArray();
+        var constant = PortraitFrameAligner.SmoothTrajectory(tiny, 384);
+        Assert.Single(constant.Select(value => (value.ShiftX, value.ShiftY, value.Scale)).Distinct());
+
+        var noisy = new[] { 0d, .2, 3.4, 3.1, 3.5, 6.2, 6.0 }.Select(value =>
+            new FrameAlignment(value, 0, 1, 0, 1, true)).ToArray();
+        var smoothed = PortraitFrameAligner.SmoothTrajectory(noisy, 384);
+        var rawVariation = noisy.Zip(noisy.Skip(1), (left, right) => Math.Abs(right.ShiftX - left.ShiftX)).Sum();
+        var smoothVariation = smoothed.Zip(smoothed.Skip(1), (left, right) => Math.Abs(right.ShiftX - left.ShiftX)).Sum();
+        Assert.True(smoothVariation < rawVariation);
+        Assert.Contains(smoothed.Zip(smoothed.Skip(1)), pair => pair.First == pair.Second);
+    }
+
+    [Fact]
+    public void Temporal_hysteresis_suppresses_noise_but_preserves_a_moving_edge()
+    {
+        var still = Solid(100);
+        var alpha = Enumerable.Repeat(1d, 4096).ToArray();
+        var frames = Enumerable.Range(0, 9).Select(index =>
+        {
+            var frame = Solid((byte)(100 + (index % 3 - 1) * 3));
+            Paint(frame, 18 + index * 2, 24, 8, 10, 220);
+            return frame;
+        }).ToArray();
+
+        var filtered = PortraitPixelStabilizer.ApplyHysteresis(
+            PortraitPixelStabilizer.TemporalLowPass(frames, alpha), still, alpha, 8);
+
+        Assert.All(filtered, frame => Assert.Equal(100, frame[0]));
+        Assert.True(filtered.Select(frame => frame[(28 * 64 + 22) * 3]).Distinct().Count() > 1,
+            "The moving edge was suppressed with the noise.");
+    }
+
+    [Fact]
+    public void Stabilized_loop_starts_and_ends_on_the_exact_still()
+    {
+        var still = Solid(90);
+        var frames = Enumerable.Range(0, 12).Select(index =>
+        {
+            var frame = still.ToArray();
+            Paint(frame, 20 + index % 4, 18, 14, 18, 180);
+            return frame;
+        }).ToArray();
+        var result = PortraitPixelStabilizer.Stabilize(frames, still, 100,
+            Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray());
+        Assert.Equal(still, result.Loop.Frames[0].Pixels);
+        Assert.Equal(still, result.Loop.Frames[^1].Pixels);
+    }
+
+    [Fact]
+    public void Palette_hysteresis_keeps_the_previous_index_for_a_small_colour_hop()
+    {
+        var loop = new FrameLoop(new byte[] { 10, 18, 200, 10 }
+            .Select(value => new RgbFrame(Solid(value), 100)).ToArray());
+        var result = GifPaletteStabilizer.Stabilize(loop, 8, 3);
+
+        Assert.Equal(result.Indices[0][0], result.Indices[1][0]);
+        Assert.NotEqual(result.Indices[1][0], result.Indices[2][0]);
+        Assert.Equal(result.Indices[0][0], result.Indices[^1][0]);
+        Assert.Equal(result.Frames[0], result.Frames[^1]);
     }
 
     [Fact]

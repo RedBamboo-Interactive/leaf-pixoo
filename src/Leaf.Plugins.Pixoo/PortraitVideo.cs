@@ -24,9 +24,13 @@ public sealed record PortraitClipSettings
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
     public int MaximumAlignmentShift { get; init; } = 12;
+    public int AlignmentSmoothingWindow { get; init; } = 5;
+    public double AlignmentDeadBandPixels { get; init; } = .3;
+    public double AlignmentConstantThresholdPixels { get; init; } = .5;
     public double SubjectMotionThreshold { get; init; } = 14;
     public int SubjectDilationPixels { get; init; } = 6;
     public int SubjectFeatherPixels { get; init; } = 4;
+    public double TemporalHysteresisThreshold { get; init; } = 10;
 }
 
 public sealed record DecodedVideoFrame(byte[] Pixels, int Width, int Height);
@@ -156,22 +160,31 @@ public static class PortraitClipProcessor
         if (decoded.Count < 2) throw new InvalidDataException("A loop needs at least two video frames so the duplicate closing frame can be dropped.");
         if (sourceReference.Length != width * height * 3)
             throw new ArgumentException("Source reference dimensions do not match the decoded clip.", nameof(sourceReference));
-        var alignments = new List<FrameAlignment>();
-        var reduced = new List<byte[]>();
-        foreach (var index in SampleIndices(decoded.Count, sampleStride, maximumFrames))
+        var sampled = SampleIndices(decoded.Count, sampleStride, maximumFrames);
+        var rawAlignments = new List<FrameAlignment>(sampled.Length);
+        foreach (var index in sampled)
         {
             var frame = decoded[index];
             if (frame.Width != width || frame.Height != height)
                 throw new InvalidDataException($"Wan returned {frame.Width}x{frame.Height}; expected {width}x{height}.");
-            var alignment = PortraitFrameAligner.EstimateTranslation(sourceReference, frame.Pixels, width, height,
-                settings.MaximumAlignmentShift);
-            alignments.Add(alignment);
+            rawAlignments.Add(PortraitFrameAligner.EstimateTranslation(sourceReference, frame.Pixels, width, height,
+                settings.MaximumAlignmentShift));
+        }
+        var alignments = PortraitFrameAligner.SmoothTrajectory(rawAlignments, Math.Max(width, height),
+            settings.AlignmentSmoothingWindow, settings.AlignmentDeadBandPixels,
+            settings.AlignmentConstantThresholdPixels);
+        var reduced = new List<byte[]>(sampled.Length);
+        for (var sample = 0; sample < sampled.Length; sample++)
+        {
+            var frame = decoded[sampled[sample]];
+            var alignment = alignments[sample];
             var aligned = PortraitFrameAligner.Align(sourceReference, frame.Pixels, width, height, alignment);
             reduced.Add(PortraitPackBuilder.BoxDownsampleRgb(aligned, width, height, crop));
         }
         var corrected = PortraitColorCorrector.TransferColour(reduced, referenceStill);
         return PortraitPixelStabilizer.Stabilize(corrected, referenceStill, frameDurationMs, alignments,
-            settings.SubjectMotionThreshold, settings.SubjectDilationPixels, settings.SubjectFeatherPixels);
+            settings.SubjectMotionThreshold, settings.SubjectDilationPixels, settings.SubjectFeatherPixels,
+            settings.TemporalHysteresisThreshold);
     }
 
     public static FrameLoop BuildStillLoop(byte[] pixels, int durationMs = 100)
