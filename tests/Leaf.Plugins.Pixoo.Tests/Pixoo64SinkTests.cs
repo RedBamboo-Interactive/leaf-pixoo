@@ -22,6 +22,26 @@ public sealed class Pixoo64SinkTests
     }
 
     [Fact]
+    public async Task Health_queries_are_buffered_and_parse_the_device_values()
+    {
+        var handler = new FakePixoo
+        {
+            ReplyFor = command => command == "Channel/GetIndex"
+                ? """{"error_code":0,"SelectIndex":4}"""
+                : """{"error_code":0,"LightSwitch":0}""",
+        };
+        var transport = (IPixooHealthTransport)Sink(handler);
+
+        Assert.Equal(4, (await transport.GetIndexAsync(Device(), CancellationToken.None)).SelectIndex);
+        Assert.Equal(0, await transport.GetLightSwitchAsync(Device(), CancellationToken.None));
+        Assert.All(handler.Requests, request =>
+        {
+            Assert.NotEqual(true, request.Chunked);
+            Assert.Equal(request.BodyLength, request.ContentLength);
+        });
+    }
+
+    [Fact]
     public async Task Sink_fails_when_device_rejects_a_command_despite_http_200()
     {
         var handler = new FakePixoo { Reply = """{"error_code": "Request data illegal json"}""" };
@@ -84,6 +104,7 @@ public sealed class Pixoo64SinkTests
     private sealed class FakePixoo : HttpMessageHandler
     {
         public string Reply { get; init; } = """{"error_code": 0}""";
+        public Func<string, string>? ReplyFor { get; init; }
         public List<SeenRequest> Requests { get; } = [];
         public string[] Commands => Requests.Select(r => r.Command).ToArray();
 
@@ -92,7 +113,7 @@ public sealed class Pixoo64SinkTests
             var bytes = await request.Content!.ReadAsByteArrayAsync(ct);
             var command = JsonNode.Parse(bytes)?["Command"]?.GetValue<string>() ?? "?";
             Requests.Add(new(command, request.Headers.TransferEncodingChunked, request.Content.Headers.ContentLength, bytes.Length));
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Reply) };
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(ReplyFor?.Invoke(command) ?? Reply) };
         }
     }
 

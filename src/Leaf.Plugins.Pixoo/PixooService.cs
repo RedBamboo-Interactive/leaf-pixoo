@@ -16,7 +16,8 @@ public sealed class PixooService(
     PortraitPackService portraits,
     DisplayPlaybackStatusStore playback,
     CurrentDisplayStore currentDisplays,
-    PixooPlaybackSettings playbackSettings)
+    PixooPlaybackSettings playbackSettings,
+    PixooHealthMonitor health)
 {
     public const string DeviceEntityType = "pixoo-device";
     private readonly ConcurrentDictionary<Guid, FaceStateMachine> states = new();
@@ -159,6 +160,21 @@ public sealed class PixooService(
         foreach (var agentId in devices.Select(device => device.AgentId).Distinct()) portraits.Schedule(agentId);
         var ambient = AmbientStateSelector.Select(DateTimeOffset.Now, playbackSettings);
         foreach (var device in devices) await Push(device, ambient, null, "startup", ct);
+    }
+
+    public void StartHealthMonitoring() => health.Start(HealthTargetsAsync);
+
+    private async Task<IReadOnlyList<PixooHealthTarget>> HealthTargetsAsync(CancellationToken ct)
+    {
+        var all = await entities.QueryAsync(new EntityQuery { TypeSlug = DeviceEntityType, Limit = 100 }, ct);
+        return all.Select(Decode)
+            .Where(device => device.Kind == DeviceKind.Pixoo64 && device.HardwareEnabled)
+            .Select(device => queues.TryGetValue(device.Id, out var slot) && slot.Hardware
+                ? new PixooHealthTarget(device, slot.Queue)
+                : null)
+            .Where(target => target is not null)
+            .Cast<PixooHealthTarget>()
+            .ToArray();
     }
 
     /// <summary>Show an Agent's live activity on every display bound to it; null returns to the ambient state.</summary>

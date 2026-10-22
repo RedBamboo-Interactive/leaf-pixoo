@@ -41,6 +41,8 @@ public sealed class PixooPlugin : ILeafPlugin
         services.AddSingleton<IVideoFrameDecoder, FfmpegVideoFrameDecoder>();
         services.AddSingleton(new HttpClient { Timeout = TimeSpan.FromSeconds(4) });
         services.AddSingleton<Pixoo64Sink>();
+        services.AddSingleton<IPixooHealthTransport>(sp => sp.GetRequiredService<Pixoo64Sink>());
+        services.AddSingleton<PixooHealthMonitor>();
         services.AddSingleton(sp => new PortraitPackService(
             sp.GetRequiredKeyedService<IEntityStore>(Id),
             sp.GetRequiredService<IAssets>(),
@@ -67,7 +69,8 @@ public sealed class PixooPlugin : ILeafPlugin
                 portraits,
                 sp.GetRequiredService<DisplayPlaybackStatusStore>(),
                 sp.GetRequiredService<CurrentDisplayStore>(),
-                sp.GetRequiredService<PixooPlaybackSettings>());
+                sp.GetRequiredService<PixooPlaybackSettings>(),
+                sp.GetRequiredService<PixooHealthMonitor>());
             portraits.PackReady += service.RefreshPortraitAsync;
             return service;
         });
@@ -81,6 +84,7 @@ public sealed class PixooPlugin : ILeafPlugin
     {
         host.GetRequiredService<PixooEventBridge>().Start();
         var service = host.GetRequiredService<PixooService>();
+        service.StartHealthMonitoring();
         host.GetRequiredService<AmbientStateScheduler>().Start(service.ApplyAmbientStateAsync);
         // Fire and forget: a slow or unreachable display must never delay Leaf startup.
         _ = Task.Run(async () =>

@@ -9,7 +9,8 @@ public sealed record CurrentDisplayLoop(
     DisplayPush Push,
     byte[] GifBytes,
     int FrameDurationMs,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    GifPublication? Publication = null);
 
 public sealed record DisplayStateSummary(
     FaceState State,
@@ -29,7 +30,8 @@ public sealed class CurrentDisplayStore
     private long revision;
 
     public CurrentDisplayLoop Set(PixooDevice device, DisplayPush push, FrameLoop deliveredLoop,
-        byte[] gifBytes, int frameDurationMs, DateTimeOffset? updatedAt = null)
+        byte[] gifBytes, int frameDurationMs, DateTimeOffset? updatedAt = null,
+        GifPublication? publication = null)
     {
         deliveredLoop.Validate();
         if (gifBytes.Length == 0) throw new ArgumentException("Current display GIF cannot be empty.", nameof(gifBytes));
@@ -38,7 +40,7 @@ public sealed class CurrentDisplayStore
         var key = $"{sequence:x16}-{digest}";
         var delivered = push with { Loop = deliveredLoop };
         var value = new CurrentDisplayLoop(key, delivered, gifBytes, frameDurationMs,
-            updatedAt ?? DateTimeOffset.UtcNow);
+            updatedAt ?? DateTimeOffset.UtcNow, publication);
         current[device.Id] = value;
         var receipts = history.GetOrAdd(device.Id, _ => new());
         receipts.Enqueue(new(value.UpdatedAt, push.State, push.Gesture, push.Cause, deliveredLoop.Frames.Count));
@@ -50,6 +52,14 @@ public sealed class CurrentDisplayStore
 
     public IReadOnlyList<PushReceipt> History(Guid deviceId)
         => history.TryGetValue(deviceId, out var values) ? values.Reverse().ToArray() : [];
+
+    public void RecordTransition(Guid deviceId, string cause, DateTimeOffset at)
+    {
+        if (!current.TryGetValue(deviceId, out var display)) return;
+        var receipts = history.GetOrAdd(deviceId, _ => new());
+        receipts.Enqueue(new(at, display.Push.State, display.Push.Gesture, cause, display.Push.Loop.Frames.Count));
+        while (receipts.Count > 20) receipts.TryDequeue(out _);
+    }
 }
 
 internal static class CurrentGifHttp

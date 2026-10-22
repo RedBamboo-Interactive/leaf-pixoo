@@ -93,7 +93,14 @@ public sealed record DisplayPlaybackStatus(
     string? PlayingGif,
     DateTimeOffset? LastFetchedAt,
     string? LastFetchedFrom,
-    string? DeliveryError);
+    string? DeliveryError,
+    DisplayHealthStatus? Health = null);
+
+public sealed record DisplayHealthStatus(
+    string State,
+    DateTimeOffset? LastProbeAt,
+    DateTimeOffset? LastRecoveryAt,
+    int ConsecutiveFailures);
 
 public sealed record PixooDevice(
     Guid Id,

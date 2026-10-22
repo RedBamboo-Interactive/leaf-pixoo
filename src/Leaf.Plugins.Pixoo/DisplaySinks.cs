@@ -9,6 +9,16 @@ public interface IDisplaySink
     Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default);
 }
 
+public sealed record PixooIndexProbe(int SelectIndex);
+
+public interface IPixooHealthTransport
+{
+    Task<PixooIndexProbe> GetIndexAsync(PixooDevice device, CancellationToken ct);
+    Task<int> GetLightSwitchAsync(PixooDevice device, CancellationToken ct);
+    Task<GifFetch> RedeliverAsync(PixooDevice device, CurrentDisplayLoop current,
+        DateTimeOffset requestedAt, Action markSwap, CancellationToken ct);
+}
+
 public sealed class EmulatorSink(
     DisplayPlaybackStatusStore statuses,
     IGifEncoder gifEncoder,
@@ -36,7 +46,7 @@ public sealed class Pixoo64Sink(
     IGifEncoder gifEncoder,
     DisplayPlaybackStatusStore statuses,
     CurrentDisplayStore current,
-    PixooPlaybackSettings settings) : IDisplaySink
+    PixooPlaybackSettings settings) : IDisplaySink, IPixooHealthTransport
 {
     public async Task PushAsync(PixooDevice device, DisplayPush push, CancellationToken ct = default)
     {
@@ -69,7 +79,7 @@ public sealed class Pixoo64Sink(
             if (fetch is null) throw new GifDeliveryException(
                 "Display could not fetch its animation: check the Leaf Pixoo GIF firewall rule.");
             statuses.Playing(device.Id, push.AnimationName, fetch, null);
-            current.Set(device, push, push.Loop, gif, settings.GifFrameDurationMs);
+            current.Set(device, push, push.Loop, gif, settings.GifFrameDurationMs, publication: publication);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -82,6 +92,41 @@ public sealed class Pixoo64Sink(
             var fallbackGif = await gifEncoder.EncodeAsync(fallback, settings.GifFrameDurationMs, ct);
             current.Set(device, push, fallback, fallbackGif, settings.GifFrameDurationMs);
         }
+    }
+
+    public async Task<PixooIndexProbe> GetIndexAsync(PixooDevice device, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(settings.HealthProbeTimeout);
+        var body = await Post(Endpoint(device), new JsonObject { ["Command"] = "Channel/GetIndex" }, deadline.Token);
+        return new(ReadInt(body, "SelectIndex", "Channel/GetIndex"));
+    }
+
+    public async Task<int> GetLightSwitchAsync(PixooDevice device, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(settings.HealthProbeTimeout);
+        var body = await Post(Endpoint(device), new JsonObject { ["Command"] = "Channel/GetAllConf" }, deadline.Token);
+        return ReadInt(body, "LightSwitch", "Channel/GetAllConf");
+    }
+
+    public async Task<GifFetch> RedeliverAsync(PixooDevice device, CurrentDisplayLoop current,
+        DateTimeOffset requestedAt, Action markSwap, CancellationToken ct)
+    {
+        var publication = current.Publication
+            ?? throw new InvalidOperationException("The current Pixoo program has no reusable LAN GIF publication.");
+        markSwap();
+        await Post(Endpoint(device), new JsonObject
+        {
+            ["Command"] = "Device/PlayTFGif",
+            ["FileType"] = 2,
+            ["FileName"] = publication.Url,
+        }, ct);
+        var fetch = await gifHost.WaitForFetchAfterAsync(publication, requestedAt, settings.FetchTimeout, ct)
+            ?? throw new InvalidOperationException(
+                "Display could not fetch its animation: check the Leaf Pixoo GIF firewall rule.");
+        statuses.Playing(device.Id, current.Push.AnimationName, fetch, null);
+        return fetch;
     }
 
     internal static IReadOnlyList<JsonObject> BuildFramePayloads(FrameLoop loop, int picId)
@@ -119,7 +164,7 @@ public sealed class Pixoo64Sink(
         return loop;
     }
 
-    private async Task Post(Uri endpoint, JsonObject payload, CancellationToken ct)
+    private async Task<JsonNode> Post(Uri endpoint, JsonObject payload, CancellationToken ct)
     {
         // The Pixoo's embedded HTTP server cannot read chunked bodies (PostAsJsonAsync streams without a
         // Content-Length) and answers HTTP 200 with {"error_code":"Request data illegal json"}. Send a
@@ -129,6 +174,25 @@ public sealed class Pixoo64Sink(
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadAsStringAsync(ct);
         EnsureDeviceAccepted(payload["Command"]?.GetValue<string>() ?? "?", body);
+        return JsonNode.Parse(body)!;
+    }
+
+    private static Uri Endpoint(PixooDevice device)
+    {
+        if (!device.HardwareEnabled) throw new InvalidOperationException("Pixoo hardware output is disabled.");
+        if (string.IsNullOrWhiteSpace(device.Host)) throw new InvalidOperationException("A Pixoo host is required.");
+        return new UriBuilder("http", device.Host) { Path = "/post" }.Uri;
+    }
+
+    private static int ReadInt(JsonNode body, string property, string command)
+    {
+        var value = body[property];
+        if (value is JsonValue json)
+        {
+            if (json.TryGetValue<int>(out var number)) return number;
+            if (json.TryGetValue<string>(out var text) && int.TryParse(text, out number)) return number;
+        }
+        throw new InvalidOperationException($"Pixoo returned no valid {property} for {command}.");
     }
 
     internal static void EnsureDeviceAccepted(string command, string body)

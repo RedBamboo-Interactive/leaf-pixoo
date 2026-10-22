@@ -69,6 +69,15 @@ public sealed class GifPlaybackTests
         Assert.Equal("image/gif", accepted.Response.ContentType);
         var fetch = await host.WaitForFetchAsync(publication, TimeSpan.FromSeconds(1), CancellationToken.None);
         Assert.Equal("192.168.1.60", fetch?.RemoteAddress);
+
+        var repeated = host.WaitForFetchAfterAsync(publication, fetch!.FetchedAt.AddTicks(1),
+            TimeSpan.FromSeconds(1), CancellationToken.None);
+        Assert.False(repeated.IsCompleted);
+        await Task.Delay(5);
+        var fetchedAgain = Context("/" + token + "/resting.gif");
+        fetchedAgain.Connection.RemoteIpAddress = IPAddress.Parse("192.168.1.60");
+        await host.HandleAsync(fetchedAgain);
+        Assert.True((await repeated)!.FetchedAt > fetch.FetchedAt);
     }
 
     [Fact]

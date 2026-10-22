@@ -23,6 +23,10 @@ public sealed record PixooPlaybackSettings
     public TimeOnly QuietEnd { get; init; } = new(7, 30);
     public TimeSpan RotationMinimum { get; init; } = TimeSpan.FromMinutes(10);
     public TimeSpan RotationMaximum { get; init; } = TimeSpan.FromMinutes(20);
+    public TimeSpan HealthInterval { get; init; } = TimeSpan.FromSeconds(60);
+    public TimeSpan HealthProbeTimeout { get; init; } = TimeSpan.FromSeconds(3);
+    public TimeSpan HealthRecoveryInitialBackoff { get; init; } = TimeSpan.FromMinutes(5);
+    public TimeSpan HealthRecoveryMaximumBackoff { get; init; } = TimeSpan.FromMinutes(30);
 
     public static PixooPlaybackSettings FromEnvironment()
     {
@@ -34,6 +38,8 @@ public sealed record PixooPlaybackSettings
             DreamingEnd = ReadTime("PIXOO_DREAMING_END", defaults.DreamingEnd),
             QuietStart = ReadTime("PIXOO_QUIET_START", defaults.QuietStart),
             QuietEnd = ReadTime("PIXOO_QUIET_END", defaults.QuietEnd),
+            HealthInterval = TimeSpan.FromSeconds(ReadInt("PIXOO_HEALTH_INTERVAL_SECONDS",
+                (int)defaults.HealthInterval.TotalSeconds, 10, 3600)),
         };
     }
 
@@ -78,6 +84,8 @@ public interface ILanGifHost
 {
     Task<GifPublication> PublishAsync(PixooDevice device, string animationName, byte[] gif, CancellationToken ct);
     Task<GifFetch?> WaitForFetchAsync(GifPublication publication, TimeSpan timeout, CancellationToken ct);
+    Task<GifFetch?> WaitForFetchAfterAsync(GifPublication publication, DateTimeOffset after, TimeSpan timeout, CancellationToken ct)
+        => WaitForFetchAsync(publication, timeout, ct);
 }
 
 public sealed class DisplayPlaybackStatusStore
@@ -88,9 +96,23 @@ public sealed class DisplayPlaybackStatusStore
         => values.GetValueOrDefault(deviceId) ?? new(null, null, null, null);
 
     public void Playing(Guid deviceId, string name, GifFetch? fetch, string? error)
-        => values[deviceId] = new(name, fetch?.FetchedAt, fetch?.RemoteAddress, error);
+        => values.AddOrUpdate(deviceId,
+            _ => new(name, fetch?.FetchedAt, fetch?.RemoteAddress, error),
+            (_, previous) => new(name, fetch?.FetchedAt, fetch?.RemoteAddress, error, previous.Health));
 
-    public void Dark(Guid deviceId) => values[deviceId] = new("screen-off", null, null, null);
+    public void Dark(Guid deviceId) => values.AddOrUpdate(deviceId,
+        _ => new("screen-off", null, null, null),
+        (_, previous) => new("screen-off", null, null, null, previous.Health));
+
+    public void Health(Guid deviceId, DisplayHealthStatus health)
+        => values.AddOrUpdate(deviceId,
+            _ => new(null, null, null, null, health),
+            (_, previous) => previous with { Health = health });
+
+    public void DeliveryProblem(Guid deviceId, string error)
+        => values.AddOrUpdate(deviceId,
+            _ => new(null, null, null, error),
+            (_, previous) => previous with { DeliveryError = error });
 }
 
 public sealed class LanGifHost : ILanGifHost, IAsyncDisposable
@@ -100,7 +122,17 @@ public sealed class LanGifHost : ILanGifHost, IAsyncDisposable
         public Guid DeviceId { get; } = deviceId;
         public byte[] Bytes { get; } = bytes;
         public DateTimeOffset PublishedAt { get; } = publishedAt;
-        public TaskCompletionSource<GifFetch> Fetched { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public object Gate { get; } = new();
+        public GifFetch? LastFetch { get; set; }
+        public TaskCompletionSource<GifFetch> NextFetch { get; set; } = NewSignal();
+        private static TaskCompletionSource<GifFetch> NewSignal()
+            => new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<GifFetch> RotateSignal()
+        {
+            var previous = NextFetch;
+            NextFetch = NewSignal();
+            return previous;
+        }
     }
 
     private readonly PixooPlaybackSettings settings;
@@ -143,11 +175,28 @@ public sealed class LanGifHost : ILanGifHost, IAsyncDisposable
     }
 
     public async Task<GifFetch?> WaitForFetchAsync(GifPublication publication, TimeSpan timeout, CancellationToken ct)
+        => await WaitForFetchAfterAsync(publication, publication.PublishedAt, timeout, ct);
+
+    public async Task<GifFetch?> WaitForFetchAfterAsync(GifPublication publication, DateTimeOffset after,
+        TimeSpan timeout, CancellationToken ct)
     {
         if (!items.TryGetValue(publication.FileName, out var item)) return null;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(timeout);
-        try { return await item.Fetched.Task.WaitAsync(deadline.Token); }
+        try
+        {
+            while (true)
+            {
+                Task<GifFetch> next;
+                lock (item.Gate)
+                {
+                    if (item.LastFetch is { } fetched && fetched.FetchedAt >= after) return fetched;
+                    next = item.NextFetch.Task;
+                }
+                var observed = await next.WaitAsync(deadline.Token);
+                if (observed.FetchedAt >= after) return observed;
+            }
+        }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
     }
 
@@ -168,7 +217,14 @@ public sealed class LanGifHost : ILanGifHost, IAsyncDisposable
         context.Response.ContentLength = item.Bytes.Length;
         await context.Response.Body.WriteAsync(item.Bytes, context.RequestAborted);
         var remote = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        item.Fetched.TrySetResult(new(DateTimeOffset.UtcNow, remote));
+        var fetched = new GifFetch(DateTimeOffset.UtcNow, remote);
+        TaskCompletionSource<GifFetch> signal;
+        lock (item.Gate)
+        {
+            item.LastFetch = fetched;
+            signal = item.RotateSignal();
+        }
+        signal.TrySetResult(fetched);
     }
 
     internal GifPublication SeedForTest(string fileName, byte[] bytes)

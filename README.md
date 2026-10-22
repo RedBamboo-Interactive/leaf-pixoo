@@ -50,7 +50,7 @@ The current RedCompute model defines `UnifiedSessionInfo.OwnerAgentId`, but prov
 
 ## Pixoo-64 status and safety
 
-The hardware path is disabled by default. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no automatic retries, and never contacts Divoom services. The primary path, validated on a real Pixoo-64 on 21 October 2026, is:
+The hardware path is disabled by default. It uses only an explicitly configured LAN host and sends local `POST http://<host>/post` requests. It performs no network discovery, no cloud calls, no unbounded request retries, and never contacts Divoom services. The primary path, validated on a real Pixoo-64 on 21 October 2026, is:
 
 1. Determine the specific local IPv4 interface that routes to the configured Pixoo with a UDP connect (no packet is sent).
 2. Start a minimal Kestrel HTTP/1 listener on that routed address and port 18950, never on `0.0.0.0`.
@@ -60,6 +60,8 @@ The hardware path is disabled by default. It uses only an explicitly configured 
 GIFs are exactly 64×64, loop forever, retain duplicate pause frames, and use a uniform 100 ms delay. Before encoding, one global weighted palette is built for the loop and palette-index hysteresis retains the previous entry across sub-threshold colour changes. `ffmpeg` then encodes the stabilized RGB24 palette with `palettegen=stats_mode=full:reserve_transparent=0`, `paletteuse=dither=none`, and changed-rectangle `+offsetting`; the repository adds no image-codec dependency. The GIF host port is configurable with `PIXOO_GIF_PORT`.
 
 If the listener cannot bind or the Pixoo does not fetch the URL within 12 seconds, the sink records “display could not fetch its animation: check the Leaf Pixoo GIF firewall rule” and falls back to `Draw/ResetHttpGifId` plus at most 40 uniformly timed `Draw/SendHttpGif` frames. This fallback retains the serialized latest-wins queue but necessarily shows the device's Loading overlay. Requests use buffered JSON bodies with `Content-Length` because the device rejects chunked bodies while still returning HTTP 200. A non-zero `error_code` is treated as failure and does not kill the queue worker. Dark sends `Channel/OnOffScreen` directly.
+
+Enabled physical displays receive one serialized `Channel/GetIndex` health probe every 60 seconds (`PIXOO_HEALTH_INTERVAL_SECONDS`). Probes are skipped while a push is active and during the five-second hardware push floor. After a confirmed prior GIF delivery, a channel other than 4 or an offline-to-online transition replays the exact current URL once; recovery attempts back off from 5 to 30 minutes until a healthy channel-4 probe. `Channel/GetAllConf` is read only on a relevant transition, and `LightSwitch: 0` is treated as an intentional user screen-off rather than a fault.
 
 ## Build and test
 
