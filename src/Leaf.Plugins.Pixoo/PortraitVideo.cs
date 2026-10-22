@@ -24,7 +24,7 @@ public sealed record PortraitClipSettings
     public TimeSpan RetryCooldown { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan AgentFailureCooldown { get; init; } = TimeSpan.FromMinutes(10);
     public int MaximumAlignmentShift { get; init; } = 12;
-    public double StaticPixelThreshold { get; init; } = 8;
+    public double StaticPixelThreshold { get; init; } = 14;
     public double MotionPixelThreshold { get; init; } = 5;
     public int MinimumMotionComponentPixels { get; init; } = 3;
 }

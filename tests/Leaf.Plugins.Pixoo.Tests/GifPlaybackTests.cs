@@ -154,6 +154,40 @@ public sealed class GifPlaybackTests
         Assert.All(processed.Loop.Frames, frame => AssertNoIsolatedChangedPixel(frame.Pixels, still));
     }
 
+    [Fact]
+    public void Similarity_aligner_recovers_subpixel_scale_and_translation()
+    {
+        const int side = 384;
+        var still = TexturedSource(side);
+        var frame = SimilarityFrame(still, side, 1.018, 3.4, -2.6);
+
+        var alignment = PortraitFrameAligner.EstimateTranslation(still, frame, side, side);
+
+        Assert.True(alignment.Reliable, $"Similarity fit was rejected (confidence {alignment.Confidence:F3}).");
+        Assert.InRange(alignment.Scale, 1.014, 1.022);
+        Assert.InRange(alignment.ShiftX, 2.65, 4.15);
+        Assert.InRange(alignment.ShiftY, -3.35, -1.85);
+    }
+
+    [Fact]
+    public void Subject_region_freezes_disconnected_background_motion()
+    {
+        var still = Solid(60);
+        var frames = Enumerable.Range(0, 8).Select(index =>
+        {
+            var frame = still.ToArray();
+            Paint(frame, 20 + index % 2, 12, 12, 14, 210); // coherent subject motion
+            Paint(frame, 52, 8 + index % 2, 3, 12, 180);   // disconnected shelf-edge wobble
+            return frame;
+        }).ToArray();
+
+        var stabilized = PortraitPixelStabilizer.Stabilize(frames, still, 100,
+            Enumerable.Repeat(new FrameAlignment(0, 0, 1, 0, 1, true), frames.Length).ToArray(), 14, 5, 3);
+
+        Assert.Contains(stabilized.Loop.Frames, frame => RegionDifference(frame.Pixels, still, 18, 10, 18, 18) > 0);
+        Assert.All(stabilized.Loop.Frames, frame => Assert.Equal(0, RegionDifference(frame.Pixels, still, 49, 5, 10, 20)));
+    }
+
     [Theory]
     [InlineData("2026-10-21T03:00:00+02:00", FaceState.Dreaming)]
     [InlineData("2026-10-21T23:45:00+02:00", FaceState.Asleep)]
@@ -248,6 +282,33 @@ public sealed class GifPlaybackTests
         return frame;
     }
 
+    private static byte[] SimilarityFrame(byte[] still, int side, double scale, double shiftX, double shiftY)
+    {
+        var result = still.ToArray();
+        var centre = (side - 1) / 2d;
+        for (var y = 0; y < side; y++)
+        for (var x = 0; x < side; x++)
+        {
+            var sourceX = centre + (x - centre - shiftX) / scale;
+            var sourceY = centre + (y - centre - shiftY) / scale;
+            if (sourceX < 0 || sourceX >= side - 1 || sourceY < 0 || sourceY >= side - 1) continue;
+            var target = (y * side + x) * 3;
+            for (var channel = 0; channel < 3; channel++)
+                result[target + channel] = (byte)Math.Round(Bilinear(still, side, sourceX, sourceY, channel));
+        }
+        return result;
+    }
+
+    private static double Bilinear(byte[] pixels, int side, double x, double y, int channel)
+    {
+        var x0 = (int)Math.Floor(x); var y0 = (int)Math.Floor(y);
+        var x1 = x0 + 1; var y1 = y0 + 1;
+        var fx = x - x0; var fy = y - y0;
+        double At(int px, int py) => pixels[(py * side + px) * 3 + channel];
+        return At(x0, y0) * (1 - fx) * (1 - fy) + At(x1, y0) * fx * (1 - fy)
+            + At(x0, y1) * (1 - fx) * fy + At(x1, y1) * fx * fy;
+    }
+
     private static double RegionDifference(byte[] frame, byte[] still, int x, int y, int width, int height)
     {
         double difference = 0;
@@ -260,6 +321,18 @@ public sealed class GifPlaybackTests
             difference += Math.Abs(frame[offset + 2] - still[offset + 2]);
         }
         return difference;
+    }
+
+    private static void Paint(byte[] pixels, int x, int y, int width, int height, byte value)
+    {
+        for (var py = y; py < y + height; py++)
+        for (var px = x; px < x + width; px++)
+        {
+            var offset = (py * 64 + px) * 3;
+            pixels[offset] = value;
+            pixels[offset + 1] = (byte)(value / 2);
+            pixels[offset + 2] = (byte)(255 - value / 2);
+        }
     }
 
     private static void AssertNoIsolatedChangedPixel(byte[] frame, byte[] still)

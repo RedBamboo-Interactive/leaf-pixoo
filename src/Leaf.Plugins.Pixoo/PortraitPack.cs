@@ -80,7 +80,7 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-gif-v5-lightx2v-stabilized";
+    public const string PipelineVersion = "portrait-gif-v6-lightx2v-similarity-stabilized";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
