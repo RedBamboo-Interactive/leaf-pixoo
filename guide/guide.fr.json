@@ -1,0 +1,89 @@
+{
+  "schema": "leaf.extension-guide-locale/1",
+  "lang": "fr",
+  "tagline": "Donne à ton Agent un petit visage animé en pixels sur un écran 64x64, affiché directement dans Leaf.",
+  "summary": "Pixoo transforme le portrait de ton Agent en un minuscule visage animé sur un écran de 64x64 pixels. Dans Leaf, tu vois une copie fidèle d'un écran Pixoo, et chaque écran appartient à un seul Agent. C'est un visage discret, pas un tableau de bord : jamais de texte, de notification ni d'horloge. Pour l'instant tu règles son humeur à la main, il ne suit pas encore les conversations de ton Agent tout seul.",
+  "whatYouGet": [
+    "Une section Display dans Nova où tu ajoutes un écran, choisis l'Agent qu'il montre et regardes le visage en pixels.",
+    "Des boutons pour essayer chaque humeur (resting, listening, thinking, speaking, working, dreaming, asleep, dark) et deux petits gestes.",
+    "Un visage construit à partir de la tenue actuelle de ton Agent, ou de son avatar sinon. Les clips animés sont créés sur ton PC quand c'est possible.",
+    "Tout seul, le visage s'endort tard le soir et rêve au petit matin."
+  ],
+  "privacy": "Rien ne sort de chez toi. Les clips animés sont créés par ton propre ComfyUI, et Leaf ne contacte jamais Divoom ni aucun service en ligne. Un écran physique, s'il est branché, n'est joint que via ton réseau local.",
+  "requirements": {
+    "nova": {
+      "label": "Nova",
+      "detail": "La section Display se trouve dans Nova."
+    },
+    "ffmpeg": {
+      "label": "ffmpeg",
+      "detail": "Nécessaire pour lire les clips de portrait animés. Il doit être installé là où Leaf peut le trouver. Sans lui, tu n'as que des portraits fixes."
+    },
+    "comfyui": {
+      "label": "ComfyUI avec une recette vidéo",
+      "detail": "Facultatif. Crée les clips animés. Sans lui, le visage reste un portrait fixe."
+    },
+    "outfits": {
+      "label": "Outfits",
+      "detail": "Facultatif. Le visage suit la tenue actuelle de ton Agent ; sans Outfits, il utilise son avatar."
+    }
+  },
+  "setup": {
+    "nova": {
+      "title": "Installe Nova",
+      "body": "Pixoo ajoute une section Display à Nova : Nova doit donc être installé."
+    },
+    "open-display": {
+      "title": "Ouvre la section Display",
+      "body": "Dans Nova, ouvre Display. La première fois, elle te propose d'ajouter un écran."
+    },
+    "add-display": {
+      "title": "Ajoute un écran",
+      "body": "Clique sur Add display et choisis l'Agent à montrer. Un écran Pixoo simulé apparaît, avec le visage de cet Agent."
+    },
+    "try-moods": {
+      "title": "Essaie les humeurs",
+      "body": "Sous Simulate, appuie sur Thinking, Speaking, Asleep et les autres pour voir comment réagit le visage. La luminosité a son propre curseur."
+    },
+    "animate": {
+      "title": "Obtiens des visages animés (facultatif)",
+      "body": "Installe ffmpeg et l'extension ComfyUI. Sous Portrait clips, de petits badges montrent chaque clip en cours de création, un à la fois."
+    }
+  },
+  "useCases": {
+    "calm-presence": {
+      "title": "Une présence calme à l'écran",
+      "story": "Laisse la section Display ouverte sur un écran libre. Le visage se repose, jette un œil autour de lui et respire : ton Agent est là, sans fenêtre de chat ni notification en plus."
+    },
+    "preview-moods": {
+      "title": "Prévisualiser chaque humeur",
+      "story": "Appuie sur Thinking, Speaking ou Dreaming sous Simulate pour voir exactement l'allure du visage dans chaque état, avant même de brancher un écran physique."
+    },
+    "new-outfit-new-face": {
+      "title": "Nouvelle tenue, nouveau visage",
+      "story": "Change la tenue de ton Agent avec Outfits et le visage en pixels est refait à partir de la nouvelle image. Les clips animés mettent un peu de temps à être créés.",
+      "try": "Nova, change de tenue pour que je voie ton nouveau visage en pixels."
+    }
+  },
+  "limitations": [
+    "C'est un visage, pas un tableau de bord : jamais de texte, de noms, de notifications ni d'horloge.",
+    "Il ne suit pas encore tout seul les conversations de ton Agent. Utilise les boutons Simulate pour changer l'humeur.",
+    "Depuis l'écran, tu ne peux ajouter que des écrans simulés. Un Pixoo-64 physique est désactivé par défaut et n'a pas encore de réglage en quelques clics.",
+    "Chaque écran montre un seul Agent.",
+    "Les clips animés sont créés un par un sur ton PC : certaines humeurs peuvent donc être prêtes avant d'autres."
+  ],
+  "troubleshooting": {
+    "still-picture": {
+      "symptom": "Le visage n'est qu'une image fixe",
+      "fix": "Les clips animés demandent ffmpeg et l'extension ComfyUI. Regarde les badges Portrait clips dans les réglages de l'écran. Un clip qui échoue est retenté une fois, puis réessayé après une pause."
+    },
+    "cannot-add": {
+      "symptom": "Je ne peux pas cliquer sur Add display",
+      "fix": "Un écran a besoin d'un Agent à montrer. Vérifie que tu as au moins un Agent, puis réessaie."
+    },
+    "firewall": {
+      "symptom": "« Display could not fetch its animation »",
+      "fix": "Ce message apparaît avec un Pixoo-64 physique. Autorise le pare-feu Windows à accepter les connexions de ton réseau local sur le port 18950, celui que Leaf utilise pour envoyer l'animation à l'écran."
+    }
+  }
+}

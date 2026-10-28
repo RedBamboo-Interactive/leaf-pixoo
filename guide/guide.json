@@ -1,0 +1,122 @@
+{
+  "schema": "leaf.extension-guide/1",
+  "id": "pixoo",
+  "kind": "integration",
+  "category": "home",
+  "tagline": "Give your Agent a small animated pixel face on a 64x64 screen, shown right inside Leaf.",
+  "summary": "Pixoo turns your Agent's portrait into a tiny animated face on a 64x64 pixel display. In Leaf you see a faithful copy of a Pixoo screen, and each display belongs to exactly one Agent. It is a quiet face, not a dashboard: it never shows text, notifications or a clock. For now you set its mood by hand, and it does not yet follow your Agent's conversations by itself.",
+  "whatYouGet": [
+    "A Display section inside Nova where you add a display, choose which Agent it shows, and watch the pixel face.",
+    "Buttons to try each mood (resting, listening, thinking, speaking, working, dreaming, asleep, dark) and two small gestures.",
+    "A face built from your Agent's current outfit picture, or their avatar if there is none. Animated clips are made on your PC when possible.",
+    "By itself, the face falls asleep late at night and dreams in the small hours."
+  ],
+  "runsWhere": "local",
+  "cost": { "kind": "free" },
+  "privacy": "Nothing leaves your home. Animated clips are made by your own ComfyUI, and Leaf never contacts Divoom or any online service. A physical display, if connected, is reached only over your local network.",
+  "requirements": [
+    {
+      "id": "nova",
+      "kind": "extension",
+      "label": "Nova",
+      "detail": "The Display section lives inside Nova.",
+      "check": "extension:nova"
+    },
+    {
+      "id": "ffmpeg",
+      "kind": "software",
+      "label": "ffmpeg",
+      "detail": "Needed to read the animated portrait clips. It must be installed where Leaf can find it. Without it you only get still portraits."
+    },
+    {
+      "id": "comfyui",
+      "kind": "extension",
+      "label": "ComfyUI with a video recipe",
+      "detail": "Optional. Makes the animated clips. Without it the face stays a still portrait.",
+      "check": "extension:provider-comfyui"
+    },
+    {
+      "id": "outfits",
+      "kind": "extension",
+      "label": "Outfits",
+      "detail": "Optional. The face follows your Agent's current outfit; without it, it uses their avatar.",
+      "check": "extension:outfits"
+    }
+  ],
+  "setup": [
+    {
+      "id": "nova",
+      "title": "Have Nova installed",
+      "body": "Pixoo adds a Display section to Nova, so Nova needs to be installed.",
+      "check": "extension:nova"
+    },
+    {
+      "id": "open-display",
+      "title": "Open the Display section",
+      "body": "In Nova, open Display. The first time, it invites you to add a display.",
+      "action": { "kind": "open-app", "route": "/apps/nova/display" }
+    },
+    {
+      "id": "add-display",
+      "title": "Add a display",
+      "body": "Click Add display and choose the Agent it will show. A simulated Pixoo screen appears, with that Agent's face."
+    },
+    {
+      "id": "try-moods",
+      "title": "Try the moods",
+      "body": "Under Simulate, press Thinking, Speaking, Asleep and the others to see how the face behaves. Brightness has its own slider."
+    },
+    {
+      "id": "animate",
+      "title": "Get animated faces (optional)",
+      "body": "Install ffmpeg and the ComfyUI extension. Under Portrait clips, small badges show each clip being made, one at a time.",
+      "check": "extension:provider-comfyui"
+    }
+  ],
+  "useCases": [
+    {
+      "id": "calm-presence",
+      "title": "A calm presence on screen",
+      "story": "Leave the Display section open on a spare screen. The face rests, glances around and breathes, so your Agent feels present without another chat window or any notification."
+    },
+    {
+      "id": "preview-moods",
+      "title": "Preview every mood",
+      "story": "Press Thinking, Speaking or Dreaming under Simulate to see exactly how the face will look in each state, before you ever connect a physical screen."
+    },
+    {
+      "id": "new-outfit-new-face",
+      "title": "New outfit, new face",
+      "story": "Change your Agent's outfit with Outfits and the pixel face is rebuilt from the new picture. Animated clips take a little while to be made.",
+      "try": "Nova, change into a different outfit so I can see your new pixel face."
+    }
+  ],
+  "limitations": [
+    "It is a face, not a dashboard: it never shows text, names, notifications or clocks.",
+    "It does not yet follow your Agent's conversations by itself. Use the Simulate buttons to change the mood.",
+    "From the screen you can only add simulated displays. A physical Pixoo-64 is off by default and has no point-and-click setup yet.",
+    "Each display shows exactly one Agent.",
+    "Animated clips are made one at a time on your PC, so some moods can be ready before others."
+  ],
+  "troubleshooting": [
+    {
+      "id": "still-picture",
+      "symptom": "The face is only a still picture",
+      "fix": "Animated clips need ffmpeg and the ComfyUI extension. Check the Portrait clips badges in Display settings. A clip that fails is tried twice, then retried after a pause.",
+      "check": "extension:provider-comfyui"
+    },
+    {
+      "id": "cannot-add",
+      "symptom": "I cannot click Add display",
+      "fix": "A display needs an Agent to show. Make sure you have at least one Agent, then try again."
+    },
+    {
+      "id": "firewall",
+      "symptom": "\"Display could not fetch its animation\"",
+      "fix": "This appears with a physical Pixoo-64. Allow Windows Firewall to accept connections from your local network on port 18950, the port Leaf uses to hand the animation to the screen."
+    }
+  ],
+  "agent": {
+    "whenToSuggest": "When the user wants a small ambient visual presence for an Agent, such as a pixel-art face, or asks about a Pixoo 64x64 display."
+  }
+}
