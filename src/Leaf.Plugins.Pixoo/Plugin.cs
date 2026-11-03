@@ -150,10 +150,10 @@ public sealed class PixooPlugin : ILeafPlugin
         {
             var request = await Read<PortraitRebuildRequest>(context, ct);
             return Results.Ok(await service.RebuildPortraitAsync(PixooCaller.From(context.User), request.AgentId, request.Force, ct));
-        }).WithSummary("Rebuilds the cached portrait pack for one Agent from its current outfit image and returns the pack status. The JSON body requires agentId; force (default false) is optional. The rebuild can start GPU video jobs.");
+        }).WithSummary("Rebuilds the cached portrait pack for one Agent from its current outfit image and returns the pack status. The JSON body requires agentId; force (default false) is optional. The caller must own a display bound to that Agent or be an administrator, and the rebuild can start GPU video jobs.");
         group.MapGet("/portrait/status", async (Guid agentId, HttpContext context, PixooService service, CancellationToken ct) =>
             Results.Ok(await service.PortraitStatusAsync(PixooCaller.From(context.User), agentId, ct)))
-            .WithSummary("Returns the portrait pack and clip generation status for one Agent. Requires the agentId query parameter.");
+            .WithSummary("Returns the portrait pack and clip generation status for one Agent. Requires the agentId query parameter, and the caller must own a display bound to that Agent or be an administrator.");
     }
 
     private static async Task<T> Read<T>(HttpContext context, CancellationToken ct)

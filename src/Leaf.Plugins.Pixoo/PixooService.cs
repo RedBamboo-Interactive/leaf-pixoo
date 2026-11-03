@@ -136,16 +136,26 @@ public sealed class PixooService(
         return await DisplayStateAsync(caller, device.Id, ct);
     }
 
-    public async Task<PortraitPackStatus> RebuildPortraitAsync(PixooCaller caller, Guid agentId, bool force, CancellationToken ct)
+    private async Task RequirePortraitAccessAsync(PixooCaller caller, Guid agentId, CancellationToken ct)
     {
         if (!(await AgentsAsync(caller, ct)).Any(agent => agent.Id == agentId)) throw new KeyNotFoundException("Agent not found.");
+        var deviceAgents = (await DevicesAsync(caller, ct)).Select(device => device.AgentId);
+        if (!CanManagePortrait(caller, agentId, deviceAgents)) throw new KeyNotFoundException("Agent not found.");
+    }
+
+    internal static bool CanManagePortrait(PixooCaller caller, Guid agentId, IEnumerable<Guid> ownedDeviceAgents)
+        => caller.IsAdmin && caller.AgentId is null || ownedDeviceAgents.Contains(agentId);
+
+    public async Task<PortraitPackStatus> RebuildPortraitAsync(PixooCaller caller, Guid agentId, bool force, CancellationToken ct)
+    {
+        await RequirePortraitAccessAsync(caller, agentId, ct);
         await portraits.RebuildAsync(agentId, force, ct);
         return portraits.Status(agentId);
     }
 
     public async Task<PortraitPackStatus> PortraitStatusAsync(PixooCaller caller, Guid agentId, CancellationToken ct)
     {
-        if (!(await AgentsAsync(caller, ct)).Any(agent => agent.Id == agentId)) throw new KeyNotFoundException("Agent not found.");
+        await RequirePortraitAccessAsync(caller, agentId, ct);
         return portraits.Status(agentId);
     }
 
