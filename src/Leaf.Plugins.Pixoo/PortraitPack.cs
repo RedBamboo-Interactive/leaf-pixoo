@@ -79,7 +79,7 @@ public static class PortraitSourceFingerprint
 
 public sealed class PortraitPackBuilder
 {
-    public const string PipelineVersion = "portrait-gif-v8-temporally-stable";
+    public const string PipelineVersion = "portrait-gif-v9-head-first-framing";
 
     public PreparedPortrait Prepare(byte[] sourceBytes)
     {
@@ -89,7 +89,11 @@ public sealed class PortraitPackBuilder
         side = Math.Clamp(side, Math.Min(source.Width, source.Height) / 2, Math.Min(source.Width, source.Height));
         var centerX = face.Left + face.Width / 2;
         var x = Math.Clamp(centerX - side / 2, 0, source.Width - side);
-        var y = Math.Clamp((int)Math.Round(face.Top - face.Height * .30), 0, source.Height - side);
+        var detectedY = Math.Clamp((int)Math.Round(face.Top - face.Height * .30), 0, source.Height - side);
+        // Outfit portraits are composed head-first. A large skin-coloured garment can otherwise win the
+        // lightweight skin scan and place the crop below the actual face, cutting the head off entirely.
+        var maximumHeadFirstTop = (int)Math.Round(source.Height * .12);
+        var y = detectedY > maximumHeadFirstTop ? 0 : detectedY;
         var square = new ImageRect(x, y, side, side);
         using var crop = Crop(source, square);
         var cropPng = EncodePng(crop);

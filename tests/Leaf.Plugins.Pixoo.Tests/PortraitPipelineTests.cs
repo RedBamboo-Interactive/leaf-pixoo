@@ -19,6 +19,16 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
+    public void Skin_coloured_clothing_cannot_push_the_head_out_of_the_portrait_crop()
+    {
+        var prepared = new PortraitPackBuilder().Prepare(SyntheticPortraitWithRaisedHandAndSkinColouredTop());
+
+        Assert.Equal(0, prepared.SourceSquare.Y);
+        Assert.InRange(prepared.SourceSquare.X, 100, 300);
+        Assert.True(prepared.SourceSquare.Right >= 700);
+    }
+
+    [Fact]
     public void Slow_fallback_plate_widens_square_and_maps_it_back_to_video_space()
     {
         var plate = PortraitPackBuilder.BuildPlateGeometry(new ImageRect(200, 100, 300, 300), 1000, 800);
@@ -216,6 +226,28 @@ public sealed class PortraitPipelineTests
         canvas.DrawOval(new SKRect(418, 335, 456, 358), dark);
         canvas.DrawOval(new SKRect(550, 320, 589, 343), dark);
         canvas.DrawRect(474, 480, 98, 18, dark);
+        canvas.Flush();
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+        return encoded.ToArray();
+    }
+
+    private static byte[] SyntheticPortraitWithRaisedHandAndSkinColouredTop()
+    {
+        using var bitmap = new SKBitmap(1024, 1024, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        bitmap.Erase(new SKColor(24, 31, 40));
+        using var canvas = new SKCanvas(bitmap);
+        using var skin = new SKPaint { Color = new SKColor(214, 159, 123), IsAntialias = false };
+        using var top = new SKPaint { Color = new SKColor(228, 195, 158), IsAntialias = false };
+        using var hair = new SKPaint { Color = new SKColor(205, 166, 72), IsAntialias = false };
+        using var dark = new SKPaint { Color = new SKColor(35, 28, 25), IsAntialias = false };
+        canvas.DrawRect(300, 430, 424, 500, top);
+        canvas.DrawOval(new SKRect(382, 55, 674, 390), hair);
+        canvas.DrawOval(new SKRect(414, 88, 642, 352), skin);
+        canvas.DrawOval(new SKRect(450, 176, 482, 194), dark);
+        canvas.DrawOval(new SKRect(566, 176, 598, 194), dark);
+        canvas.DrawRect(496, 272, 64, 14, dark);
+        canvas.DrawOval(new SKRect(52, 128, 220, 300), skin);
         canvas.Flush();
         using var image = SKImage.FromBitmap(bitmap);
         using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
