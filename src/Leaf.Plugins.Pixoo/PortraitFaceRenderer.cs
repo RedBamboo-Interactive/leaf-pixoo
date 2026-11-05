@@ -48,11 +48,19 @@ public static class PortraitLoopRenderer
         var clip = pack.Primary(clipState);
         if (clip is null) return new(still, null, DisplayPlaybackMode.Continuous);
         var motion = Scale(clip.Loop, level);
+        if (state == FaceState.Asleep && gesture is null)
+        {
+            // Asleep is a still: eyes shut, nothing moving in the living room at night.
+            var closed = PortraitCompositeBuilder.EyesClosedFrame(motion);
+            return closed is null
+                ? new(still, null, DisplayPlaybackMode.Continuous)
+                : new(new FrameLoop([new RgbFrame(closed, 100)]).Validate(), null, DisplayPlaybackMode.Continuous);
+        }
         var loop = state switch
         {
             FaceState.Listening or FaceState.Thinking or FaceState.Working => PortraitCompositeBuilder.BuildActive(
                 still.Frames[0].Pixels, motion, pack.Provenance.SourceHash, state, compositeSettings),
-            FaceState.Dreaming or FaceState.Asleep => PortraitCompositeBuilder.BuildSleeping(motion, TimeSpan.FromSeconds(60)),
+            FaceState.Dreaming => PortraitCompositeBuilder.BuildSleeping(motion, TimeSpan.FromSeconds(60)),
             _ => motion,
         };
         return new DisplayProgram(still, loop, gesture is null ? DisplayPlaybackMode.Continuous : DisplayPlaybackMode.OneShot).Validate();

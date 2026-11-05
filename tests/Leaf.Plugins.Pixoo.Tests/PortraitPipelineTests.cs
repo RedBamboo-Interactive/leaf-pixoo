@@ -122,7 +122,7 @@ public sealed class PortraitPipelineTests
         Assert.All(working.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)200, value));
         Assert.Equal(DisplayPlaybackMode.Continuous, asleep.Mode);
         Assert.All(asleep.Still.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
-        Assert.All(asleep.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
+        Assert.Null(asleep.Motion);
     }
 
     // Distance-from-still profile measured on a real 20-frame dreaming clip (2026-11-05): open, shut for ~12 frames, open.
@@ -151,7 +151,7 @@ public sealed class PortraitPipelineTests
     }
 
     [Fact]
-    public void Asleep_and_dreaming_render_without_the_open_eyed_frames_of_the_clip()
+    public void Asleep_is_an_eyes_closed_still_and_dreaming_never_opens_the_eyes()
     {
         var still = Enumerable.Repeat((byte)100, RgbFrame.ByteCount).ToArray();
         var dreaming = Clip(FaceState.Dreaming, still) with { Loop = ProfiledClip() };
@@ -160,7 +160,10 @@ public sealed class PortraitPipelineTests
         var asleep = PortraitLoopRenderer.Render(pack, FaceState.Asleep, 100);
         var dreamingProgram = PortraitLoopRenderer.Render(pack, FaceState.Dreaming, 100);
 
-        Assert.All(asleep.Motion!.Frames, frame => Assert.True(frame.Pixels[0] >= Math.Round(136 * .35)));
+        // Asleep is one dimmed still: the deepest eyes-closed frame (frame 13, 151), never the open endpoint.
+        Assert.Null(asleep.Motion);
+        Assert.Single(asleep.InitialLoop.Frames);
+        Assert.All(asleep.InitialLoop.Frames[0].Pixels, value => Assert.Equal((byte)Math.Round(151 * .35), value));
         Assert.All(dreamingProgram.Motion!.Frames, frame => Assert.True(frame.Pixels[0] >= 136));
     }
 

@@ -240,6 +240,19 @@ public static class PortraitCompositeBuilder
             .ToArray()).Validate();
     }
 
+    /// <summary>
+    /// The clip frame farthest from its open-eyed endpoint: the deepest point of the eyes-closed hold. Null when the clip
+    /// has no motion to measure.
+    /// </summary>
+    public static byte[]? EyesClosedFrame(FrameLoop motion)
+    {
+        motion.Validate();
+        var anchor = motion.Frames[0].Pixels;
+        var distance = motion.Frames.Select(frame => PortraitColorCorrector.MeanAbsoluteDifference(frame.Pixels, anchor)).ToArray();
+        var peak = Array.IndexOf(distance, distance.Max());
+        return distance[peak] <= 0 ? null : motion.Frames[peak].Pixels.ToArray();
+    }
+
     private static FrameLoop BuildOne(byte[] still, IReadOnlyList<FrameLoop> clips, int seed, CompositeSettings settings)
     {
         var random = new Random(seed);
