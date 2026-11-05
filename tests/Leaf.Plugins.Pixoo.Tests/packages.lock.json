@@ -123,8 +123,12 @@
       "leaf.plugins.pixoo": {
         "type": "Project",
         "dependencies": {
+          "Leaf.Sdk": "[1.0.0, )",
           "SkiaSharp": "[3.119.0, )"
         }
+      },
+      "leaf.sdk": {
+        "type": "Project"
       }
     }
   }
