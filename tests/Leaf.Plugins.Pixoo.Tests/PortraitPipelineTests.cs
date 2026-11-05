@@ -125,6 +125,45 @@ public sealed class PortraitPipelineTests
         Assert.All(asleep.Motion!.Frames[0].Pixels, value => Assert.Equal((byte)70, value));
     }
 
+    // Distance-from-still profile measured on a real 20-frame dreaming clip (2026-11-05): open, shut for ~12 frames, open.
+    private static readonly double[] RealDreamingProfile =
+        [0.0, 0.2, 0.7, 1.9, 3.6, 4.0, 3.7, 4.1, 4.7, 5.0, 4.8, 4.6, 4.8, 5.1, 5.1, 4.1, 1.9, 0.9, 0.5, 0.0];
+
+    private static FrameLoop ProfiledClip()
+        => new(RealDreamingProfile.Select(distance =>
+            new RgbFrame(Enumerable.Repeat((byte)(100 + Math.Round(distance * 10)), RgbFrame.ByteCount).ToArray(), 100)).ToArray());
+
+    [Fact]
+    public void Sleeping_loop_holds_the_eyes_closed_stretch_and_never_shows_the_open_endpoints()
+    {
+        var loop = PortraitCompositeBuilder.BuildSleeping(ProfiledClip(), TimeSpan.FromSeconds(60));
+
+        // Closed stretch is frames 4..15 (>= 70% of the 5.1 peak); open endpoints and the opening/closing frames never appear.
+        var closed = Enumerable.Range(4, 12).Select(index => (byte)(100 + Math.Round(RealDreamingProfile[index] * 10))).ToHashSet();
+        Assert.All(loop.Frames, frame => Assert.Contains(frame.Pixels[0], closed));
+        Assert.All(loop.Frames, frame => Assert.Equal(100, frame.DurationMs));
+
+        // Forward 12 + backward 10 = 22 steps at 2x = 44 frames per cycle; whole cycles only so the device wrap is seamless.
+        Assert.Equal(0, loop.Frames.Count % 44);
+        Assert.InRange(loop.Frames.Count, 550, 650);
+        Assert.Equal(loop.Frames[0].Pixels, loop.Frames[44].Pixels);
+        Assert.Equal(loop.Frames[^1].Pixels, loop.Frames[43].Pixels);
+    }
+
+    [Fact]
+    public void Asleep_and_dreaming_render_without_the_open_eyed_frames_of_the_clip()
+    {
+        var still = Enumerable.Repeat((byte)100, RgbFrame.ByteCount).ToArray();
+        var dreaming = Clip(FaceState.Dreaming, still) with { Loop = ProfiledClip() };
+        var pack = Pack(still, dreaming);
+
+        var asleep = PortraitLoopRenderer.Render(pack, FaceState.Asleep, 100);
+        var dreamingProgram = PortraitLoopRenderer.Render(pack, FaceState.Dreaming, 100);
+
+        Assert.All(asleep.Motion!.Frames, frame => Assert.True(frame.Pixels[0] >= Math.Round(136 * .35)));
+        Assert.All(dreamingProgram.Motion!.Frames, frame => Assert.True(frame.Pixels[0] >= 136));
+    }
+
     [Fact]
     public async Task Generation_is_ordered_and_bounded_to_two_attempts_per_clip()
     {

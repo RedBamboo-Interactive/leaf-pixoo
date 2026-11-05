@@ -52,7 +52,7 @@ public static class PortraitLoopRenderer
         {
             FaceState.Listening or FaceState.Thinking or FaceState.Working => PortraitCompositeBuilder.BuildActive(
                 still.Frames[0].Pixels, motion, pack.Provenance.SourceHash, state, compositeSettings),
-            FaceState.Dreaming or FaceState.Asleep => PortraitCompositeBuilder.Repeat(motion, TimeSpan.FromSeconds(60)),
+            FaceState.Dreaming or FaceState.Asleep => PortraitCompositeBuilder.BuildSleeping(motion, TimeSpan.FromSeconds(60)),
             _ => motion,
         };
         return new DisplayProgram(still, loop, gesture is null ? DisplayPlaybackMode.Continuous : DisplayPlaybackMode.OneShot).Validate();

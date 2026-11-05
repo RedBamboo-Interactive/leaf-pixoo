@@ -206,6 +206,40 @@ public static class PortraitCompositeBuilder
             .ToArray()).Validate();
     }
 
+    /// <summary>
+    /// Builds a sleeping loop that never opens the eyes. Every clip starts and ends on the open-eyed still, so tiling it
+    /// reads as a blink every couple of seconds. This keeps only the contiguous stretch farthest from that endpoint (the
+    /// eyes-closed hold), plays it forward then backward at <paramref name="slowdown"/>x so breathing continues without a
+    /// seam, and repeats whole cycles only, so the device's own loop wrap is seamless too.
+    /// </summary>
+    public static FrameLoop BuildSleeping(FrameLoop motion, TimeSpan duration, int frameDurationMs = 100,
+        double closedFraction = .7, int slowdown = 2)
+    {
+        motion.Validate();
+        if (closedFraction is <= 0 or > 1) throw new ArgumentOutOfRangeException(nameof(closedFraction));
+        if (slowdown < 1) throw new ArgumentOutOfRangeException(nameof(slowdown));
+        var frames = Normalize(motion, frameDurationMs).ToArray();
+        var anchor = frames[0].Pixels;
+        var distance = frames.Select(frame => PortraitColorCorrector.MeanAbsoluteDifference(frame.Pixels, anchor)).ToArray();
+        var peak = Array.IndexOf(distance, distance.Max());
+        if (distance[peak] <= 0) return Repeat(motion, duration, frameDurationMs);
+
+        var threshold = distance[peak] * closedFraction;
+        var start = peak;
+        while (start > 0 && distance[start - 1] >= threshold) start--;
+        var end = peak;
+        while (end < frames.Length - 1 && distance[end + 1] >= threshold) end++;
+
+        var forward = frames[start..(end + 1)];
+        var cycle = forward.Concat(forward.Reverse().Skip(1).SkipLast(1))
+            .SelectMany(frame => Enumerable.Repeat(frame, slowdown))
+            .ToArray();
+        var cycles = Math.Max(1, (int)Math.Round(Frames(duration, frameDurationMs) / (double)cycle.Length));
+        return new FrameLoop(Enumerable.Range(0, cycles * cycle.Length)
+            .Select(index => new RgbFrame(cycle[index % cycle.Length].Pixels.ToArray(), frameDurationMs))
+            .ToArray()).Validate();
+    }
+
     private static FrameLoop BuildOne(byte[] still, IReadOnlyList<FrameLoop> clips, int seed, CompositeSettings settings)
     {
         var random = new Random(seed);
